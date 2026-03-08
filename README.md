@@ -14,3 +14,6 @@ A classic alien invasion-style shooting game built with Python and Pygame.
 1. Ensure you have Python and Pygame installed:
    ```bash
    pip install pygame
+
+### ❤️❤️点击即玩❤️❤️
+[点击下载游戏压缩包](https://github.com/LOHINA-maker/alien_invasion_game/raw/main/alien_invasion_game.zip)
