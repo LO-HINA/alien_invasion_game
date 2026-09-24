@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { COLORS, GAME_H, GAME_W } from '../config';
+import type { EnemyKind } from './Enemy';
 import type { GameScene } from '../scenes/GameScene';
 
 type Attack = 'fan' | 'ring' | 'spiral' | 'burst' | 'minions' | 'rain';
@@ -26,7 +27,7 @@ export class Boss extends Phaser.Physics.Arcade.Sprite {
     scene.add.existing(this);
     scene.physics.add.existing(this);
     this.setDepth(6);
-    this.maxHp = this.hp = 260 + level * 180;
+    this.maxHp = this.hp = 260 + level * 200;
     (this.body as Phaser.Physics.Arcade.Body).setCircle(85, this.width / 2 - 85, this.height / 2 - 85);
   }
 
@@ -122,9 +123,13 @@ export class Boss extends Phaser.Physics.Arcade.Sprite {
           for (let i = 0; i < 4; i++) game.fireEnemy(this.x + side * (70 + i * 18), my - 20, DOWN, 240 + i * 25, 'ebullet');
         }
         break;
-      case 'minions':
-        for (let i = -1; i <= 1; i++) game.spawnEnemy(this.enraged ? 'charger' : 'drone', this.x + i * 80, this.y + 60);
+      case 'minions': {
+        // 关数高了召唤得更凶：自爆机比小飞机难缠得多，一次也来得多
+        const kind: EnemyKind = this.level >= 5 ? 'rammer' : this.enraged ? 'charger' : 'drone';
+        const spread = 1 + Math.min(3, Math.floor(this.level / 4));
+        for (let i = -spread; i <= spread; i++) game.spawnEnemy(kind, this.x + i * 70, this.y + 60);
         break;
+      }
     }
   }
 }

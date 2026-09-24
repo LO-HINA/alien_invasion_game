@@ -166,6 +166,14 @@ export function generateTextures(scene: Phaser.Scene): void {
     up([[10, -9], [-12, -5], [-12, 5], [10, 9]]),
   ]);
 
+  // 自爆机：撞角朝前的尖头，机心一颗引信（锁定之后会闪，闪得越快离引爆越近）
+  shape(scene, 'rammer', 48, 64, COLORS.yellow, [
+    up([[-26, 0], [-4, -11], [14, -11], [14, 11], [-4, 11]]),
+    up([[-26, 0], [-8, -5], [-8, 5]]),
+  ], (g, cx, cy) => {
+    glow(g, COLORS.white, circlePath(7, cx, cy + 3), 0.85);
+  });
+
   make(scene, 'boss', 240, 280, (g, cx, cy) => {
     const hull = up([[-120, 0], [-70, -70], [20, -95], [110, -60], [80, 0], [110, 60], [20, 95], [-70, 70]]);
     fillPoly(g, hull, cx, cy, COLORS.magenta, 0.12);

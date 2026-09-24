@@ -1,8 +1,8 @@
 import Phaser from 'phaser';
-import { COLORS, GAME_H, GAME_W } from '../config';
+import { COLORS, DIFF, GAME_H, GAME_W } from '../config';
 import type { GameScene } from '../scenes/GameScene';
 
-export type EnemyKind = 'drone' | 'wave' | 'shooter' | 'charger' | 'tank' | 'sniper' | 'spinner' | 'splitter' | 'bomber';
+export type EnemyKind = 'drone' | 'wave' | 'shooter' | 'charger' | 'tank' | 'sniper' | 'spinner' | 'splitter' | 'bomber' | 'rammer';
 
 interface EnemyDef {
   hp: number;
@@ -25,6 +25,8 @@ export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
   spinner: { hp: 7, speed: 85, score: 550, xp: 5, color: COLORS.purple, radius: 20, dropChance: 0.22 },
   splitter: { hp: 3, speed: 140, score: 320, xp: 3, color: COLORS.magenta, radius: 17, dropChance: 0.12 },
   bomber: { hp: 9, speed: 95, score: 650, xp: 6, color: COLORS.orange, radius: 22, dropChance: 0.28 },
+  // 自爆机：不打弹，一路追着你撞。血薄、速度不算快，麻烦的是它不按编队走
+  rammer: { hp: 3, speed: 155, score: 300, xp: 2, color: COLORS.yellow, radius: 14, dropChance: 0.1 },
 };
 
 export interface SpawnOpts {
@@ -39,6 +41,14 @@ export interface SpawnOpts {
 const MARGIN = 160;
 /** 编队最多会退到入场边外这么远（最长的纵列是 14 架 × 55 像素 = 715），没进过战场的按它兜底 */
 const SPAWN_BACK = 800;
+
+/** 自爆机锁定之后的转弯率（弧度/秒）。转弯半径 = 速度 / 它 ≈ 120 像素，
+ *  横向拉开能绕出去、往回跑能拉开距离，它治的是「站着不动」而不是「会不会躲」 */
+const RAMMER_TURN = 1.6;
+/** 自爆机的引信：锁定之后追这么久就自己炸了，不会跟到天涯海角 */
+const RAMMER_FUEL_MS = 5200;
+/** 锁定之后往前冲的加速倍数 */
+const RAMMER_DASH = 1.25;
 
 /** 敌机从任意一条边飞进来，穿过战场后从另一侧飞走（不惩罚玩家） */
 export class Enemy extends Phaser.Physics.Arcade.Sprite {
@@ -84,7 +94,11 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     this.setAlpha(1).setScale(1);
     const def = this.def;
     this.diff = diff;
-    this.hp = Math.ceil(def.hp * (1 + (diff - 1) * 0.5));
+    // 取整往**下**取，不是往上：1 血的杂兵乘上任何大于 1 的倍率，ceil 都会把它顶成 2，
+    // 第 3 关（倍率 1.15）就「两发才死」了 —— 那正是「点对技能就该一直秒杀」要避免的。
+    // floor 让 1 血杂兵一直保持 1 血（到第 11 关倍率摸到 2 才变厚），
+    // 硬骨头（重装机那些）按同样的倍率照常涨，24 → 48
+    this.hp = Math.floor(def.hp * Math.min(DIFF.hpMax, 1 + (diff - 1) * DIFF.hp));
     this.t = 0;
     this.mode = 0;
     this.orbHitAt = 0;
@@ -112,8 +126,10 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     const game = this.scene as GameScene;
     const dt = delta / 1000;
     this.t += dt;
-    const sp = this.def.speed * (1 + (this.diff - 1) * 0.2);
-    const fireScale = 1 / (1 + (this.diff - 1) * 0.25);
+    // 三个倍率都从同一个难度数推出来（见 config 的 DIFF）。三个都留了上限，
+    // 血的上限压得特别低（2 倍）—— 见 config 里那段说明，难度主力是数量和射速
+    const sp = this.def.speed * Math.min(DIFF.speedMax, 1 + (this.diff - 1) * DIFF.speed);
+    const fireScale = Math.max(DIFF.fireFloor, 1 / (1 + (this.diff - 1) * DIFF.fire));
 
     if (!this.entered && this.x > 0 && this.x < GAME_W && this.y > 0 && this.y < GAME_H) this.entered = true;
     const onScreen = this.entered && this.x > 24 && this.x < GAME_W - 24 && this.y > 24 && this.y < GAME_H - 24;
@@ -241,6 +257,33 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
           this.nextFire = time + 2100 * fireScale;
           for (let i = 0; i < 8; i++) game.fireEnemy(this.x, this.y, this.spiral + (i / 8) * Math.PI * 2, 150 + this.diff * 10, 'ebullet2');
           this.spiral += 0.39;
+        }
+        break;
+      }
+      case 'rammer': {
+        // 先直着飞进场（给玩家看一眼「它来了」），进了战场才锁定
+        if (this.mode === 0) {
+          this.setVelocity(ca * sp, sa * sp);
+          if (this.entered && this.t > 0.7) {
+            this.mode = 1;
+            this.stateAt = time;
+          }
+          break;
+        }
+        // 锁定之后一路朝玩家拐，但转弯率有限：横向拉开就能把它甩在身后
+        // （它比玩家慢，追不上；站着不动才躲不掉 —— 要治的就是那个）
+        const want = Phaser.Math.Angle.Between(this.x, this.y, game.player.x, game.player.y);
+        // 包一层 Wrap：RotateTo 的返回值是不取模的累加值，转够一圈之后
+        // |目标 - 当前| 会超过 2π，落进它「差不到一整圈 = 干脆甩过去」那一档直接瞬移
+        this.moveAngle = Phaser.Math.Angle.Wrap(Phaser.Math.Angle.RotateTo(this.moveAngle, want, RAMMER_TURN * dt));
+        this.setRotation(this.moveAngle - Math.PI / 2);
+        this.setVelocity(Math.cos(this.moveAngle) * sp * RAMMER_DASH, Math.sin(this.moveAngle) * sp * RAMMER_DASH);
+        // 引信闪烁，越接近自爆闪得越快
+        const left = Math.max(0, 1 - (time - this.stateAt) / RAMMER_FUEL_MS);
+        this.setAlpha(Math.floor(time / (40 + 130 * left)) % 2 ? 0.4 : 1);
+        if (time - this.stateAt >= RAMMER_FUEL_MS) {
+          this.setAlpha(1);
+          game.detonate(this);
         }
         break;
       }

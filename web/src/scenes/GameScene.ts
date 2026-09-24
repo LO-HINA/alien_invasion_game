@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { BULLET, COLORS, COMBO_WINDOW_MS, FREEZE, GAME_H, GAME_W, GRAZE, HEAL_AMOUNT, hex, HIT, HURT_VIGNETTE_MS, LEECH, MAX_MULTIPLIER, PLAYER, REROLLS, XP_PICKUP, xpToNext } from '../config';
+import { BULLET, COLORS, COMBO_WINDOW_MS, FREEZE, GAME_H, GAME_W, GRAZE, HEAL_AMOUNT, hex, HIT, HURT_VIGNETTE_MS, LEECH, MAX_MULTIPLIER, PLAYER, REROLLS, stageDiff, stagePack, XP_PICKUP, xpToNext } from '../config';
 import { Arsenal } from '../objects/Arsenal';
 import { Boss } from '../objects/Boss';
 import { Bullet, type BulletOpts } from '../objects/Bullet';
@@ -14,7 +14,7 @@ import { neonText } from '../systems/ui';
 import { Hud } from './Hud';
 
 type Phase = 'waves' | 'boss-wait' | 'boss' | 'clear' | 'over';
-type WavePattern = 'row' | 'column' | 'v' | 'sine' | 'shooters' | 'chargers' | 'tank' | 'swarm' | 'snipers' | 'spinners' | 'splitters' | 'bombers';
+type WavePattern = 'row' | 'column' | 'v' | 'sine' | 'shooters' | 'chargers' | 'tank' | 'swarm' | 'snipers' | 'spinners' | 'splitters' | 'bombers' | 'rammers';
 /** 敌机从哪条边进场 */
 type EntrySide = 'top' | 'right' | 'bottom' | 'left';
 
@@ -32,6 +32,7 @@ const WAVE_UNLOCK: [WavePattern, number][] = [
   ['swarm', 3],
   ['spinners', 3],
   ['bombers', 3],
+  ['rammers', 4],
 ];
 
 // 四边出现概率，正面仍然是主要压力来源
@@ -50,6 +51,11 @@ const OPPOSITE: Record<EntrySide, EntrySide> = { top: 'bottom', bottom: 'top', l
 const BREATH_EVERY = 5;
 /** 喘息那一下多给多少毫秒 */
 const BREATH_MS = 1400;
+/**
+ * 一条纵列最多排几架。纵列是顺着入场方向排出去的，最后几架会退到入场边之外，
+ * 这个数 × 间距（55）必须留在 Enemy.SPAWN_BACK（没进过战场的回收框）以内
+ */
+const COLUMN_MAX = 14;
 
 type KeyName = 'W' | 'A' | 'S' | 'D' | 'UP' | 'DOWN' | 'LEFT' | 'RIGHT' | 'X' | 'K' | 'P' | 'ESC' | 'M' | 'SPACE' | 'SHIFT' | 'F';
 
@@ -121,8 +127,14 @@ export class GameScene extends Phaser.Scene {
     super('Game');
   }
 
+  /** 难度倍率：敌机的血 / 速度 / 射速都由它推出来（曲线本身在 config 的 DIFF） */
   private get diff(): number {
-    return 1 + (this.stage - 1) * 0.3;
+    return stageDiff(this.stage);
+  }
+
+  /** 编队规模倍率：后期「数量多」靠的是它 */
+  private get pack(): number {
+    return stagePack(this.stage);
   }
 
   private get multiplier(): number {
@@ -130,7 +142,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private get wavesThisStage(): number {
-    return Math.min(30, 12 + this.stage * 3);
+    return Math.min(36, 12 + this.stage * 3);
   }
 
   get currentBoss(): Boss | undefined {
@@ -169,9 +181,12 @@ export class GameScene extends Phaser.Scene {
     this.physics.world.setBounds(0, 0, GAME_W, GAME_H);
     this.starfield = new Starfield(this);
 
+    // 池子按「后期最挤的一拍」开：后期一波能有二十来架，几组同时压过来就上百，
+    // 取空了 get() 会返回 null、之后悄悄不刷（浸泡测试专门盯这一条），所以留足余量。
+    // 上限本身不是目标 —— 数字顶到上限就说明该调曲线了，不是该把池子开大
     this.pBullets = this.physics.add.group({ classType: Bullet, maxSize: 400 });
-    this.eBullets = this.physics.add.group({ classType: Bullet, maxSize: 900 });
-    this.enemies = this.physics.add.group({ classType: Enemy, maxSize: 320, runChildUpdate: true });
+    this.eBullets = this.physics.add.group({ classType: Bullet, maxSize: 1200 });
+    this.enemies = this.physics.add.group({ classType: Enemy, maxSize: 420, runChildUpdate: true });
     this.powerups = this.physics.add.group({ classType: PowerUp, maxSize: 40 });
     this.xpOrbs = this.physics.add.group({ classType: PowerUp, maxSize: XP_PICKUP.maxOrbs });
     this.player = new Player(this, GAME_W / 2, GAME_H * 0.68);
@@ -207,7 +222,10 @@ export class GameScene extends Phaser.Scene {
       }
       if (p.invulnerable) return;
       this.hurtPlayer(HIT.ram);
-      this.hitEnemy(enemy, 8);
+      // 自爆机是撞上就同归于尽（被撞是走位失误，不给分也不给经验），
+      // 其余机型是被撞开、接着往外飞
+      if (enemy.kind === 'rammer') this.detonate(enemy);
+      else this.hitEnemy(enemy, 8);
     });
     const pickup = (_p: unknown, u: unknown) => {
       const pu = u as unknown as PowerUp;
@@ -356,7 +374,7 @@ export class GameScene extends Phaser.Scene {
         this.waveCount++;
         // 每 5 波喘一口：一直顶在最高强度，玩家会从紧张变成麻木，有起伏才有爽点
         const breath = this.waveCount % BREATH_EVERY === 0 ? BREATH_MS : 0;
-        this.nextWaveAt = time + Math.max(750, 1900 - this.stage * 120) + breath;
+        this.nextWaveAt = time + Math.max(780, 1900 - this.stage * 120) + breath;
       } else {
         // 不要求清光敌人，短暂间隔后 Boss 直接登场
         this.phase = 'boss-wait';
@@ -404,7 +422,8 @@ export class GameScene extends Phaser.Scene {
   private spawnWave(): void {
     this.wavePattern();
     if (this.stage >= 2 && Math.random() < Math.min(0.55, 0.18 + this.stage * 0.1)) this.wavePattern();
-    if (this.stage >= 4 && Math.random() < 0.3) this.wavePattern();
+    // 第三组的概率跟着关数涨：三面同时压过来是后期才该出现的场面
+    if (this.stage >= 4 && Math.random() < Math.min(0.6, 0.3 + (this.stage - 4) * 0.05)) this.wavePattern();
   }
 
   private wavePattern(): void {
@@ -414,75 +433,111 @@ export class GameScene extends Phaser.Scene {
     this.lastSide = side;
     // 沿这条边的可用长度
     const span = side === 'top' || side === 'bottom' ? GAME_W : GAME_H;
+    // 编队规模：后期一波里飞进来的是十几架还是三十架，靠这一个数（见 config 的 DIFF.pack）
+    const n = (base: number) => Math.round(base * this.pack);
 
     switch (pattern) {
       case 'row': {
-        const n = 10 + Math.min(4, this.stage);
-        for (let i = 0; i < n; i++) this.spawn(side, 'drone', (span * (i + 0.5)) / n, (i % 2) * 40);
+        const c = n(10 + Math.min(4, this.stage));
+        for (let i = 0; i < c; i++) this.spawn(side, 'drone', (span * (i + 0.5)) / c, (i % 2) * 40);
         break;
       }
-      case 'column': {
-        const c = Phaser.Math.Between(80, span - 80);
-        for (let i = 0; i < 9 + Math.min(5, this.stage); i++) this.spawn(side, 'drone', c, i * 55);
+      case 'column':
+        // 纵列是顺着入场方向一条线排出去的，最长 14 架 —— 再长尾巴就退到
+        // 「没进过战场」的兜底回收框（Enemy.SPAWN_BACK）外面，会被当漏网清掉。
+        // 所以数量翻倍靠的是并排再来一条，不是把这一条拉长
+        for (const [at, per] of this.lanes(n(9 + Math.min(5, this.stage)), COLUMN_MAX, span)) {
+          for (let i = 0; i < per; i++) this.spawn(side, 'drone', at, i * 55);
+        }
         break;
-      }
       case 'v': {
-        // 斜边张开 ±240，中心要留出这么多，否则两翼会落在入场边之外 ——
-        // 那几个成员永远飞不进战场，玩家一眼都看不到（Enemy 里另有兜底回收）
+        // 斜边始终张开 ±240：再宽两翼就落在入场边之外，永远飞不进战场（Enemy 里另有兜底回收）。
+        // 人多了就往密里排，不改张角
         const cx = Phaser.Math.Clamp(Phaser.Math.Between(0, span), 240, span - 240);
-        for (let i = 0; i < 11; i++) {
-          const k = i - 5;
-          this.spawn(side, 'drone', cx + k * 48, Math.abs(k) * 45);
+        const c = n(11);
+        for (let i = 0; i < c; i++) {
+          const t = c > 1 ? (i / (c - 1)) * 2 - 1 : 0;
+          this.spawn(side, 'drone', cx + t * 240, Math.abs(t) * 225);
         }
         break;
       }
       case 'sine': {
         const amp = Phaser.Math.Between(60, 130);
-        const cx = Phaser.Math.Clamp(Phaser.Math.Between(0, span), amp + 50, span - amp - 50);
-        for (let i = 0; i < 11; i++) this.spawn(side, 'wave', cx, i * 60, { amp, phase: -i * 0.5 });
+        for (const [at, per] of this.lanes(n(11), 12, span, amp + 50)) {
+          for (let i = 0; i < per; i++) this.spawn(side, 'wave', at, i * 60, { amp, phase: -i * 0.5 });
+        }
         break;
       }
       case 'shooters': {
-        const n = 4 + Math.min(3, Math.floor(this.stage / 2));
-        for (let i = 0; i < n; i++) this.spawn(side, 'shooter', (span * (i + 0.5)) / n, i * 30, { phase: i });
+        const c = n(4 + Math.min(3, Math.floor(this.stage / 2)));
+        for (let i = 0; i < c; i++) this.spawn(side, 'shooter', (span * (i + 0.5)) / c, i * 30, { phase: i });
         break;
       }
       case 'chargers': {
-        const n = 5 + Math.min(3, this.stage - 2);
-        for (let i = 0; i < n; i++) this.spawn(side, 'charger', Phaser.Math.Between(80, span - 80), i * 80);
+        const c = n(5 + Math.min(3, this.stage - 2));
+        for (let i = 0; i < c; i++) this.spawn(side, 'charger', Phaser.Math.Between(80, span - 80), i * 80);
         break;
       }
       case 'tank': {
         const cx = Phaser.Math.Clamp(Phaser.Math.Between(0, span), 160, span - 160);
-        this.spawn(side, 'tank', cx, 20);
+        for (let i = 0, c = Math.min(3, Math.round(this.pack)); i < c; i++) this.spawn(side, 'tank', cx + (i - (c - 1) / 2) * 150, 20 + i * 30);
         for (const d of [-150, -90, -30, 30, 90, 150]) this.spawn(side, 'drone', cx + d, 100);
         break;
       }
       case 'snipers': {
         // 隔着大半个屏幕点名，得靠不停移动把枪线甩掉
-        const n = 2 + Math.min(2, this.stage - 2);
-        for (let i = 0; i < n; i++) this.spawn(side, 'sniper', (span * (i + 0.5)) / n, i * 40, { phase: i });
+        const c = n(2 + Math.min(2, this.stage - 2));
+        for (let i = 0; i < c; i++) this.spawn(side, 'sniper', (span * (i + 0.5)) / c, i * 40, { phase: i });
         break;
       }
       case 'spinners': {
-        const n = 2 + (this.stage >= 5 ? 1 : 0);
-        for (let i = 0; i < n; i++) this.spawn(side, 'spinner', (span * (i + 0.5)) / n, i * 60, { phase: i });
+        const c = n(2 + (this.stage >= 5 ? 1 : 0));
+        for (let i = 0; i < c; i++) this.spawn(side, 'spinner', (span * (i + 0.5)) / c, i * 60, { phase: i });
         break;
       }
-      case 'splitters':
-        for (let i = 0; i < 6; i++) this.spawn(side, 'splitter', (span * (i + 0.5)) / 6, (i % 2) * 50);
+      case 'splitters': {
+        const c = n(6);
+        for (let i = 0; i < c; i++) this.spawn(side, 'splitter', (span * (i + 0.5)) / c, (i % 2) * 50);
         break;
+      }
       case 'bombers': {
         const cx = Phaser.Math.Clamp(Phaser.Math.Between(0, span), 160, span - 160);
-        this.spawn(side, 'bomber', cx, 20);
-        if (this.stage >= 5) this.spawn(side, 'bomber', cx + 160, 90);
+        for (let i = 0, c = Math.min(3, Math.round(this.pack)); i < c; i++) this.spawn(side, 'bomber', cx + i * 160, 20 + i * 70);
         for (const d of [-110, 0, 110]) this.spawn(side, 'drone', cx + d, 120);
         break;
       }
       case 'swarm':
-        for (let i = 0; i < 22; i++) this.spawn(side, i % 3 === 0 ? 'wave' : 'drone', Phaser.Math.Between(60, span - 60), i * 35, { amp: 50 });
+        for (let i = 0, c = n(22); i < c; i++) {
+          // 第 6 关起混几架自爆机：蛇形队里突然有几架脱离队伍直冲过来，最烦人
+          const kind = this.stage >= 6 && i % 7 === 3 ? 'rammer' : i % 3 === 0 ? 'wave' : 'drone';
+          this.spawn(side, kind, Phaser.Math.Between(60, span - 60), i * 35, { amp: 50 });
+        }
+        break;
+      case 'rammers':
+        // 一架一架地追过来，逼你不停换位置 —— 站着不动清屏的那套在这儿不成立。
+        // 它和别的机型不一样：不会飞走，会一直粘着，所以数量要压着给
+        for (let i = 0, c = n(2 + Math.min(3, Math.floor(this.stage / 3))); i < c; i++) {
+          this.spawn(side, 'rammer', Phaser.Math.Between(80, span - 80), i * 90);
+        }
         break;
     }
+  }
+
+  /**
+   * 一批成员拆成几条并排的编队，返回每条的中心位置和成员数。
+   * 单条编队的纵深有硬上限（顺着入场方向排出去的那一串，退到入场边外不能超过 715 像素，
+   * 见 Enemy.SPAWN_BACK），所以数量涨上去只能靠并排，不能靠拉长。
+   * `inset` 是两侧要留出的余量（蛇形要摆幅）。
+   */
+  private lanes(count: number, max: number, span: number, inset = 60): [number, number][] {
+    const groups = Math.max(1, Math.ceil(count / max));
+    const per = Math.ceil(count / groups);
+    const out: [number, number][] = [];
+    for (let i = 0; i < groups; i++) {
+      const at = (span * (i + 0.5)) / groups + Phaser.Math.Between(-25, 25);
+      out.push([Phaser.Math.Clamp(at, inset, span - inset), per]);
+    }
+    return out;
   }
 
   spawnEnemy(kind: EnemyKind, x: number, y: number, opts?: SpawnOpts): void {
@@ -583,7 +638,8 @@ export class GameScene extends Phaser.Scene {
       this.waveCount = 0;
       this.phase = 'waves';
       this.nextWaveAt = this.time.now + 1500;
-      this.banner(`STAGE ${this.stage}`, COLORS.cyan);
+      // 把关数背后的强度也报出来：难度是后段加速的，玩家该看得见自己被推着走
+      this.banner(`STAGE ${this.stage}`, COLORS.cyan, 1800, `敌方强度 ×${this.diff.toFixed(1)}`);
     });
   }
 
@@ -686,6 +742,17 @@ export class GameScene extends Phaser.Scene {
     this.dropXp(e.x, e.y, def.xp);
     if (Math.random() < def.dropChance) this.dropPowerUp(e.x, e.y);
     this.leech(def.xp);
+    e.disableBody(true, true);
+  }
+
+  /**
+   * 自爆机引爆：撞上玩家、或者燃料烧完自己炸，走同一条路。
+   * 刻意不走 hitEnemy —— 被撞是走位失误，不该顺手给分给经验（连带把吸血也送了）
+   */
+  detonate(e: Enemy): void {
+    if (!e.active) return;
+    this.explode(e.x, e.y, ENEMY_DEFS.rammer.color, 1.1);
+    audio.explode(false);
     e.disableBody(true, true);
   }
 
@@ -1125,10 +1192,16 @@ export class GameScene extends Phaser.Scene {
     band(GAME_W - depth, 0, depth, GAME_H, 0, a, 0, a);
   }
 
-  private banner(text: string, color: number, duration = 1800): Phaser.GameObjects.Text {
+  private banner(text: string, color: number, duration = 1800, sub = ''): Phaser.GameObjects.Text {
     const t = neonText(this, GAME_W / 2, GAME_H / 2 - 80, text, 48, color).setDepth(95).setAlpha(0).setScale(1.4);
     this.tweens.add({ targets: t, alpha: 1, scale: 1, duration: 300, ease: 'Back.out' });
     this.tweens.add({ targets: t, alpha: 0, delay: duration - 300, duration: 300, onComplete: () => t.destroy() });
+    if (sub) {
+      // 副标题挂在主标题下面一行，字号小一号 —— 主次分明才不会抢焦点
+      const s = neonText(this, GAME_W / 2, GAME_H / 2 - 20, sub, 22, color).setDepth(95).setAlpha(0);
+      this.tweens.add({ targets: s, alpha: 0.85, duration: 300 });
+      this.tweens.add({ targets: s, alpha: 0, delay: duration - 300, duration: 300, onComplete: () => s.destroy() });
+    }
     return t;
   }
 

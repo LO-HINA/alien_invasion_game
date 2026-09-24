@@ -99,6 +99,7 @@ TICK = """
             ebullets: s.activeEnemyBullets().length,
             pbullets: s.activePlayerBullets().length,
             orbs: s.xpOrbs.countActive(true),
+            powerups: s.powerups.countActive(true),
             scenes: window.game.scene.getScenes(true).map((x) => x.scene.key).join('+'),
             maxOut: Math.round(maxOut), stray, idle, strayInfo, longest: Math.max(0, ...window.__soakRun.values()),
         });
@@ -111,7 +112,10 @@ STOP = "() => { clearInterval(window.__soakTimer); return window.__soak; }"
 LIMITS = """
 () => {
     const s = window.game.scene.getScene('Game');
-    return { enemies: s.enemies.maxSize, ebullets: s.eBullets.maxSize, pbullets: s.pBullets.maxSize, orbs: s.xpOrbs.maxSize };
+    return {
+        enemies: s.enemies.maxSize, ebullets: s.eBullets.maxSize, pbullets: s.pBullets.maxSize,
+        orbs: s.xpOrbs.maxSize, powerups: s.powerups.maxSize,
+    };
 }
 """
 
@@ -134,15 +138,18 @@ with sync_playwright() as p:
     peak = lambda k: max(r[k] for r in rows)  # noqa: E731
     print(f"采样 {len(rows)} 次 / {SECONDS}s")
     print(f"  帧率 中位 {statistics.median(fps):.1f}  最低 {min(fps):.1f}")
-    print(f"  峰值 敌机 {peak('enemies')}  敌弹 {peak('ebullets')}  我方弹 {peak('pbullets')}  晶体 {peak('orbs')}"
-          f"   池上限 {limits['enemies']} / {limits['ebullets']} / {limits['pbullets']} / {limits['orbs']}")
+    print(f"  峰值 敌机 {peak('enemies')}  敌弹 {peak('ebullets')}  我方弹 {peak('pbullets')}"
+          f"  晶体 {peak('orbs')}  道具 {peak('powerups')}"
+          f"   池上限 {limits['enemies']} / {limits['ebullets']} / {limits['pbullets']}"
+          f" / {limits['orbs']} / {limits['powerups']}")
     stages = sorted({r["stage"] for r in rows})
     print(f"  推进 第 {rows[0]['stage']} 关 -> 第 {rows[-1]['stage']} 关（走过 {stages}），"
           f"等级 {rows[0]['level']} -> {rows[-1]['level']}")
     print(f"  阶段 出现过 {sorted({r['phase'] for r in rows})}")
 
     full = [r for r in rows if r["enemies"] >= limits["enemies"] or r["ebullets"] >= limits["ebullets"]
-            or r["pbullets"] >= limits["pbullets"] or r["orbs"] >= limits["orbs"]]
+            or r["pbullets"] >= limits["pbullets"] or r["orbs"] >= limits["orbs"]
+            or r["powerups"] >= limits["powerups"]]
     stray = [r for r in rows if r["stray"]]
     idle = [r for r in rows if r["idle"]]
     # 升级面板在后半段连着两次以上还在，才算卡住（正常一次也就一两百毫秒）
