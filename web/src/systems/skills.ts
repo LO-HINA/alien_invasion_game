@@ -1,4 +1,3 @@
-import Phaser from 'phaser';
 import { COLORS, DASH, LEECH, PLAYER } from '../config';
 import type { Player } from '../objects/Player';
 
@@ -67,10 +66,30 @@ export function skillLevel(p: Player, id: SkillId): number {
   return id === 'gun' ? p.weapon - 1 : p.skills[id];
 }
 
-/** 随机抽 n 个还能升级的技能 */
+/**
+ * 随机抽 n 个还能升级的技能。
+ * 已经拿过的技能权重更高 —— 纯随机的话选项只会越抽越杂、哪条线都点不深，
+ * 也就是常说的「升级反而变弱」。往已有的线上引，一局才成型得起来。
+ */
 export function rollSkills(p: Player, n = 3): SkillDef[] {
-  const pool = SKILLS.filter((s) => skillLevel(p, s.id) < s.max);
-  const picks = Phaser.Utils.Array.Shuffle(pool).slice(0, n);
+  const pool = SKILLS.filter((s) => skillLevel(p, s.id) < s.max).map((s) => ({ s, w: 1 + skillLevel(p, s.id) * 0.9 }));
+  const picks: SkillDef[] = [];
+  while (picks.length < n && pool.length > 0) {
+    // 按权重轮盘抽一个，抽走的从池子里拿掉，所以不会抽重
+    let total = 0;
+    for (const e of pool) total += e.w;
+    let r = Math.random() * total;
+    let idx = pool.length - 1;
+    for (let i = 0; i < pool.length; i++) {
+      r -= pool[i].w;
+      if (r <= 0) {
+        idx = i;
+        break;
+      }
+    }
+    picks.push(pool[idx].s);
+    pool.splice(idx, 1);
+  }
   while (picks.length < n && !picks.includes(REPAIR)) picks.push(REPAIR);
   return picks;
 }

@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { BULLET, COLORS, COMBO_WINDOW_MS, GAME_H, GAME_W, HEAL_AMOUNT, hex, HIT, LEECH, MAX_MULTIPLIER, PLAYER, XP_PICKUP, xpToNext } from '../config';
+import { BULLET, COLORS, COMBO_WINDOW_MS, FREEZE, GAME_H, GAME_W, HEAL_AMOUNT, hex, HIT, HURT_VIGNETTE_MS, LEECH, MAX_MULTIPLIER, PLAYER, REROLLS, XP_PICKUP, xpToNext } from '../config';
 import { Arsenal } from '../objects/Arsenal';
 import { Boss } from '../objects/Boss';
 import { Bullet, type BulletOpts } from '../objects/Bullet';
@@ -41,6 +41,15 @@ const SIDE_WEIGHT: [EntrySide, number][] = [
   ['right', 0.2],
   ['bottom', 0.2],
 ];
+
+/** 每一波压过来时，有多大概率换个方向、从上一波的对侧来 */
+const SIDE_FLIP = 0.6;
+/** 对面的那条边 */
+const OPPOSITE: Record<EntrySide, EntrySide> = { top: 'bottom', bottom: 'top', left: 'right', right: 'left' };
+/** 每这么多波留一次喘息，间隔拉长 */
+const BREATH_EVERY = 5;
+/** 喘息那一下多给多少毫秒 */
+const BREATH_MS = 1400;
 
 type KeyName = 'W' | 'A' | 'S' | 'D' | 'UP' | 'DOWN' | 'LEFT' | 'RIGHT' | 'X' | 'K' | 'P' | 'ESC' | 'M' | 'SPACE' | 'SHIFT' | 'F';
 
@@ -94,6 +103,15 @@ export class GameScene extends Phaser.Scene {
   private dashBossAt = 0;
   private layoutW = 0;
   private layoutH = 0;
+  /** 屏幕暗角：挨打与残血共用一层，画在战场之上、HUD 之下 */
+  private vignette!: Phaser.GameObjects.Graphics;
+  private hurtAt = -9999;
+  /** 顿帧结束的时刻，0 表示没在顿 */
+  private freezeUntil = 0;
+  /** 本局还剩几次升级重随 */
+  rerolls = REROLLS;
+  /** 上一波从哪条边来，用来做「换边」的压力节奏 */
+  private lastSide: EntrySide = 'bottom';
 
   constructor() {
     super('Game');
@@ -130,6 +148,10 @@ export class GameScene extends Phaser.Scene {
     this.boss = undefined;
     this.bossColliders = [];
     this.dashBossAt = 0;
+    this.hurtAt = -9999;
+    this.freezeUntil = 0;
+    this.rerolls = REROLLS;
+    this.lastSide = 'bottom';
     this.emitters = new Map();
     this.drag = undefined;
     this.pendingScore = 0;
@@ -191,6 +213,8 @@ export class GameScene extends Phaser.Scene {
     this.physics.add.overlap(this.player, this.xpOrbs, pickup);
 
     this.hud = new Hud(this);
+    // 暗角压在战场之上、HUD 和横幅之下
+    this.vignette = this.add.graphics().setDepth(90);
 
     this.keys = this.input.keyboard!.addKeys('W,A,S,D,UP,DOWN,LEFT,RIGHT,X,K,P,ESC,M,SPACE,SHIFT,F') as Record<KeyName, Phaser.Input.Keyboard.Key>;
     const kb = this.input.keyboard!;
@@ -275,6 +299,7 @@ export class GameScene extends Phaser.Scene {
   update(time: number, delta: number): void {
     this.starfield.update(delta);
     this.updateRings(delta);
+    this.drawVignette(time);
     // 碰撞结算在本帧的 scene.update 之前就跑完了，这里补满的是下一帧的额度
     this.popupBudget = POPUP_PER_FRAME;
 
@@ -322,7 +347,9 @@ export class GameScene extends Phaser.Scene {
       if (this.waveCount < this.wavesThisStage) {
         this.spawnWave();
         this.waveCount++;
-        this.nextWaveAt = time + Math.max(750, 1900 - this.stage * 120);
+        // 每 5 波喘一口：一直顶在最高强度，玩家会从紧张变成麻木，有起伏才有爽点
+        const breath = this.waveCount % BREATH_EVERY === 0 ? BREATH_MS : 0;
+        this.nextWaveAt = time + Math.max(750, 1900 - this.stage * 120) + breath;
       } else {
         // 不要求清光敌人，短暂间隔后 Boss 直接登场
         this.phase = 'boss-wait';
@@ -355,6 +382,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   private pickSide(): EntrySide {
+    // 上一波的敌人还在往这边压，新一波就从对面来，玩家刚清完一边压力就换向，
+    // 这样才有「来回救火」的感觉，而不是一直守着一个方向
+    if (this.stage >= 2 && Math.random() < SIDE_FLIP) return OPPOSITE[this.lastSide];
     let r = Math.random();
     for (const [side, w] of SIDE_WEIGHT) {
       r -= w;
@@ -374,6 +404,7 @@ export class GameScene extends Phaser.Scene {
     const pool = WAVE_UNLOCK.filter(([, s]) => this.stage >= s).map(([p]) => p);
     const pattern = Phaser.Utils.Array.GetRandom(pool) as WavePattern;
     const side = this.pickSide();
+    this.lastSide = side;
     // 沿这条边的可用长度
     const span = side === 'top' || side === 'bottom' ? GAME_W : GAME_H;
 
@@ -483,8 +514,15 @@ export class GameScene extends Phaser.Scene {
   hitBoss(dmg: number): void {
     const boss = this.boss;
     if (!boss || boss.hp <= 0) return;
+    const wasEnraged = boss.enraged;
     boss.hp -= dmg;
     this.flash(boss);
+    // 半血变招是个转折点，不喊一声玩家会以为它一直就是这么凶
+    if (!wasEnraged && boss.enraged && boss.hp > 0) {
+      this.banner('⚠ 狂 暴 ⚠', COLORS.red, 1400);
+      this.cameras.main.shake(320, 0.014);
+      this.freeze(FREEZE.rage);
+    }
     if (Math.random() < 0.3) audio.hit();
     if (boss.hp <= 0) this.killBoss(boss);
   }
@@ -493,6 +531,7 @@ export class GameScene extends Phaser.Scene {
     this.bossColliders.forEach((c) => c.destroy());
     this.bossColliders = [];
     this.phase = 'clear';
+    this.freeze(FREEZE.boss);
     this.clearEnemyBullets();
     boss.setVelocity(0, 0);
     this.addScore(5000 * this.stage, boss.x, boss.y, false);
@@ -626,7 +665,11 @@ export class GameScene extends Phaser.Scene {
     const def = ENEMY_DEFS[e.kind];
     this.explode(e.x, e.y, def.color, e.kind === 'tank' ? 1.5 : 0.7);
     audio.explode(e.kind === 'tank');
-    if (e.kind === 'tank') this.cameras.main.shake(200, 0.008);
+    if (e.kind === 'tank') {
+      this.cameras.main.shake(200, 0.008);
+      // 啃了半天的硬骨头终于爆了，这一下值得按住画面
+      this.freeze(FREEZE.tank);
+    }
     // 分裂球：打爆不算完，裂出来的两架小机接着往外飞
     if (e.kind === 'splitter') this.splitEnemy(e);
     this.addScore(def.score, e.x, e.y);
@@ -692,6 +735,13 @@ export class GameScene extends Phaser.Scene {
     this.scene.launch('LevelUp', { level: this.level - this.pendingLevels, choices: rollSkills(this.player) });
   }
 
+  /** 升级时重掷选项。次数有限，留给「想留的那条线一个都没出」的时候 */
+  tryReroll(): boolean {
+    if (this.rerolls <= 0) return false;
+    this.rerolls--;
+    return true;
+  }
+
   /** LevelUp 场景选完后调用（此时本场景仍处于暂停） */
   chooseSkill(id: SkillId): void {
     applySkill(this.player, id);
@@ -700,6 +750,8 @@ export class GameScene extends Phaser.Scene {
 
   private onPause(): void {
     this.pausedAt = this.game.loop.time;
+    // 暂停期间 delayedCall 不走，这里先松开，免得一直按着物理和补间
+    if (this.freezeUntil > 0) this.thaw();
   }
 
   private onResume(): void {
@@ -731,6 +783,8 @@ export class GameScene extends Phaser.Scene {
     }
     p.hp -= dmg;
     p.invulnUntil = this.time.now + PLAYER.hitInvulnMs;
+    // 屏幕边上红一下。掉血、震屏、音效全挤在同一刻，红晕能把这一下串成一个事件
+    this.hurtAt = this.time.now;
     audio.hurt();
     this.flash(p);
     // 受击后清掉身边的子弹，避免连续挨打
@@ -779,6 +833,7 @@ export class GameScene extends Phaser.Scene {
     if (this.bombs <= 0 || !this.player.alive || this.phase === 'over' || !this.scene.isActive()) return;
     this.bombs--;
     audio.bomb();
+    this.freeze(FREEZE.bomb);
     this.cameras.main.flash(350, 255, 255, 255);
     this.cameras.main.shake(400, 0.015);
     this.clearEnemyBullets();
@@ -976,6 +1031,52 @@ export class GameScene extends Phaser.Scene {
   private flash(target: Phaser.GameObjects.Sprite): void {
     target.setTintFill(COLORS.white);
     this.time.delayedCall(50, () => target.active && target.clearTint());
+  }
+
+  /**
+   * 顿帧：物理和补间一起按住 ms 毫秒，画面就停在爆点那一瞬。
+   * 恢复走场景时钟，不受按住的影响，所以时长是准的。
+   */
+  private freeze(ms: number): void {
+    if (this.time.now < this.freezeUntil) return; // 已经在顿着，既不再叠也不再提前松开
+    this.freezeUntil = this.time.now + ms;
+    this.physics.world.pause();
+    this.tweens.pauseAll();
+    this.time.delayedCall(ms, () => this.thaw());
+  }
+
+  private thaw(): void {
+    this.freezeUntil = 0;
+    // 玩家阵亡那一次是永久停物理的，别在这里顺手给它解了
+    if (this.phase !== 'over') this.physics.world.resume();
+    this.tweens.resumeAll();
+  }
+
+  /** 屏幕暗角：挨打时红一下，残血时一直红着呼吸。画在战场之上、HUD 之下 */
+  private drawVignette(now: number): void {
+    const g = this.vignette;
+    g.clear();
+    const p = this.player;
+    if (!p.alive) return;
+    // 挨打的红：一下亮起来再退回边上
+    const hurt = Phaser.Math.Clamp(1 - (now - this.hurtAt) / HURT_VIGNETTE_MS, 0, 1);
+    // 残血的红：意思是「快没了」而不是「刚挨打」，所以是慢呼吸，不跟受击那一下抢注意力
+    const low = p.hp / p.maxHp <= 0.3 ? 0.2 + 0.1 * Math.sin(now / 260) : 0;
+    const a = Math.max(hurt * 0.36, low);
+    if (a <= 0.004) return;
+    // 四条边各一块四角渐变：边上最浓、往里化开。
+    // 早先拿一排等宽色带叠，浓度一调高就看出台阶和中间那块方形的「洞」，渐变没这问题。
+    // 也别铺得太深 —— 红压过屏幕三分之一就会把弹幕的颜色带偏
+    const c = COLORS.red;
+    const depth = Math.min(GAME_W, GAME_H) * 0.14;
+    const band = (x: number, y: number, w: number, h: number, tl: number, tr: number, bl: number, br: number): void => {
+      g.fillGradientStyle(c, c, c, c, tl, tr, bl, br);
+      g.fillRect(x, y, w, h);
+    };
+    band(0, 0, GAME_W, depth, a, a, 0, 0);
+    band(0, GAME_H - depth, GAME_W, depth, 0, 0, a, a);
+    band(0, 0, depth, GAME_H, a, 0, a, 0);
+    band(GAME_W - depth, 0, depth, GAME_H, 0, a, 0, a);
   }
 
   private banner(text: string, color: number, duration = 1800): Phaser.GameObjects.Text {

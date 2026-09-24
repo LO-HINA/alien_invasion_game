@@ -206,6 +206,16 @@ export function generateTextures(scene: Phaser.Scene): void {
     });
   bulletTex('ebullet', COLORS.magenta);
   bulletTex('ebullet2', COLORS.orange);
+  // 高速弹单独一个外形：细长的一条，形状本身就在说「这个快」。
+  // 圆弹和快弹共用一颗球的话，玩家没法一眼分清该躲哪个。
+  // 颜色避开自机的青 / 僚机的绿 / 导弹的橙，免得看错是谁打的。
+  make(scene, 'ebullet3', 40, 16, (g, cx, cy) => {
+    g.fillStyle(COLORS.yellow, 0.28);
+    g.fillEllipse(cx, cy, 30, 7);
+    glow(g, COLORS.yellow, polyPath([[-13, 0], [13, 0]], cx, cy, false), 0.55);
+    g.fillStyle(COLORS.white, 1);
+    g.fillCircle(cx, cy, 2.2);
+  });
 
   // 道具
   make(scene, 'pu_weapon', 40, 40, (g, cx, cy) => {

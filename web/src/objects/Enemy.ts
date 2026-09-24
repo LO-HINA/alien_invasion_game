@@ -205,9 +205,9 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
             this.mode = 0;
             this.setAlpha(1);
             this.nextFire = time + 1500 * fireScale;
-            // 枪线先到、子弹后到，这一发才躲得掉
+            // 枪线先到、子弹后到，这一发才躲得掉。弹速快的用细长弹，一眼能认出该躲哪个
             game.tracer(this.x, this.y, game.player.x, game.player.y, this.def.color);
-            game.fireEnemy(this.x + Math.cos(ang) * 22, this.y + Math.sin(ang) * 22, ang, 480 + this.diff * 15, 'ebullet');
+            game.fireEnemy(this.x + Math.cos(ang) * 22, this.y + Math.sin(ang) * 22, ang, 480 + this.diff * 15, 'ebullet3');
           }
         }
         break;

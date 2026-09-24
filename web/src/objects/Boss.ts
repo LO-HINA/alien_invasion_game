@@ -5,6 +5,8 @@ import type { GameScene } from '../scenes/GameScene';
 type Attack = 'fan' | 'ring' | 'spiral' | 'burst' | 'minions' | 'rain';
 const ATTACKS: Attack[] = ['fan', 'ring', 'burst', 'spiral', 'rain', 'fan', 'minions'];
 const DOWN = Math.PI / 2;
+/** 出招前的抬手时间：先亮一下、涨一圈，玩家有时间挪位，这一招才躲得掉 */
+const TELEGRAPH_MS = 340;
 
 export class Boss extends Phaser.Physics.Arcade.Sprite {
   hp: number;
@@ -16,6 +18,8 @@ export class Boss extends Phaser.Physics.Arcade.Sprite {
   private spiralUntil = 0;
   private nextSpiral = 0;
   private spiralAngle = 0;
+  /** 正在抬手，到点才真的出招 */
+  private telegraphUntil = 0;
 
   constructor(scene: GameScene, readonly level: number) {
     super(scene, GAME_W / 2, -180, 'boss');
@@ -65,13 +69,24 @@ export class Boss extends Phaser.Physics.Arcade.Sprite {
     this.y = this.homeY + Math.sin(this.t * 0.5) * 50;
     if (this.enraged) this.setTint(Math.floor(time / 120) % 2 ? COLORS.white : 0xffaaee);
 
-    if (time >= this.nextAttack) {
-      const cooldown = (this.enraged ? 1600 : 2300) / (1 + this.level * 0.05);
-      this.nextAttack = time + cooldown;
-      this.attack(ATTACKS[this.attackIdx++ % ATTACKS.length], time, game);
+    if (this.telegraphUntil > 0) {
+      if (time >= this.telegraphUntil) {
+        // 抬手结束，这一招才算真出来
+        this.telegraphUntil = 0;
+        this.setScale(1);
+        this.setTint(Math.floor(time / 120) % 2 ? COLORS.white : 0xffaaee);
+        this.attack(ATTACKS[this.attackIdx++ % ATTACKS.length], time, game);
+        this.nextAttack = time + (this.enraged ? 1600 : 2300) / (1 + this.level * 0.05);
+      } else {
+        const k = 1 - (this.telegraphUntil - time) / TELEGRAPH_MS;
+        this.setScale(1 + 0.07 * k);
+        this.setTint(Math.floor(time / 60) % 2 ? COLORS.white : COLORS.red);
+      }
+    } else if (time >= this.nextAttack) {
+      this.telegraphUntil = time + TELEGRAPH_MS;
     }
 
-    if (time < this.spiralUntil && time >= this.nextSpiral) {
+    if (this.telegraphUntil === 0 && time < this.spiralUntil && time >= this.nextSpiral) {
       this.nextSpiral = time + (this.enraged ? 70 : 95);
       const arms = this.enraged ? 3 : 2;
       for (let i = 0; i < arms; i++) game.fireEnemy(this.x, this.y + 10, this.spiralAngle + (i * Math.PI * 2) / arms, 190, 'ebullet');
@@ -97,7 +112,7 @@ export class Boss extends Phaser.Physics.Arcade.Sprite {
       case 'burst':
         for (let i = 0; i < (this.enraged ? 7 : 5); i++) {
           this.scene.time.delayedCall(i * 110, () => {
-            if (this.active) game.fireEnemyAimed(this.x, this.muzzleY, 420, 'ebullet2', 1, 0);
+            if (this.active) game.fireEnemyAimed(this.x, this.muzzleY, 420, 'ebullet3', 1, 0);
           });
         }
         break;

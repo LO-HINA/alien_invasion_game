@@ -82,6 +82,27 @@ export const HIT = {
 /** 修复道具回多少血 */
 export const HEAL_AMOUNT = 40;
 
+/**
+ * 顿帧：砸得重的那一下把画面按住几毫秒，打击感才立得住。
+ * 按「这一下有多重」分档，轻的只按两三帧，重的按到八帧上下。
+ */
+export const FREEZE = {
+  /** 放炸弹 */
+  bomb: 60,
+  /** 打爆重装机 */
+  tank: 90,
+  /** Boss 半血变招 */
+  rage: 110,
+  /** 打掉 Boss */
+  boss: 150,
+};
+
+/** 挨打后屏幕边上那圈红色暗角留多久 */
+export const HURT_VIGNETTE_MS = 450;
+
+/** 每次升级能重随几次选项（一局的总量） */
+export const REROLLS = 2;
+
 /** 吸血：击杀回血，越硬的敌人回得越多（按经验值折算） */
 export const LEECH = {
   /** 按等级取的基础回复。给得足一点，清一波杂兵就能看到血条往回涨 */
