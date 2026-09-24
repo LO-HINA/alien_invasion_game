@@ -8,7 +8,6 @@ export interface HudState {
   score: number;
   high: number;
   stage: number;
-  lives: number;
   bombs: number;
   multiplier: number;
   level: number;
@@ -21,12 +20,15 @@ export interface HudState {
 const PAD = 20;
 const BOMB_R = 32;
 const DASH_R = 38;
-const HP_CELL = 30;
+const PAUSE_R = 26;
+/** 血条尺寸 */
+const HP_H = 18;
 
 export class Hud {
   /** 触屏按钮，GameScene 用它判断点击落点 */
   readonly bombButton: Phaser.GameObjects.Arc;
   readonly dashButton: Phaser.GameObjects.Arc;
+  readonly pauseButton: Phaser.GameObjects.Arc;
   private g: Phaser.GameObjects.Graphics;
   private score: Phaser.GameObjects.Text;
   private high: Phaser.GameObjects.Text;
@@ -36,14 +38,24 @@ export class Hud {
   private buffs: Phaser.GameObjects.Text;
   private levelText: Phaser.GameObjects.Text;
   private xpText: Phaser.GameObjects.Text;
+  private hpText: Phaser.GameObjects.Text;
   private bombCount: Phaser.GameObjects.Text;
   private bossLabel: Phaser.GameObjects.Text;
-  private icons: Phaser.GameObjects.Image[] = [];
   private bombIcon: Phaser.GameObjects.Image;
   private dashIcon: Phaser.GameObjects.Image;
+  private pauseIcon: Phaser.GameObjects.Image;
   private shownLevel = 1;
   private xpY = 0;
+  private infoY = 0;
+  private hpW = 0;
+  private hpX = 0;
   private hpY = 0;
+  /** 血条的滞后值：受伤时先掉一截白的，条子再慢慢追上来 */
+  private hpShown = 1;
+  /** 上一次的血量，用来判断这一帧是刚挨打还是刚回血 */
+  private lastHp = -1;
+  private hpFlashAt = -9999;
+  private hpHealAt = -9999;
 
   constructor(private scene: Phaser.Scene) {
     this.g = scene.add.graphics().setDepth(100);
@@ -56,8 +68,8 @@ export class Hud {
     this.weapon = left(neonText(scene, 0, 0, '', 13, COLORS.yellow));
     this.levelText = left(neonText(scene, 0, 0, '', 14, COLORS.blue));
     this.xpText = neonText(scene, 0, 0, '', 12, COLORS.blue).setOrigin(1, 0.5).setDepth(100);
+    this.hpText = neonText(scene, 0, 0, '', 12, COLORS.white).setDepth(101);
     this.bossLabel = neonText(scene, 0, 0, 'MOTHERSHIP', 12, COLORS.magenta).setDepth(100).setVisible(false);
-    for (let i = 0; i < 9; i++) this.icons.push(scene.add.image(0, 0, 'player').setScale(0.4).setDepth(100).setVisible(false));
 
     this.bombButton = scene.add.circle(0, 0, BOMB_R, COLORS.orange, 0.08).setStrokeStyle(2, COLORS.orange, 0.7).setDepth(100).setInteractive();
     this.bombIcon = scene.add.image(0, 0, 'pu_bomb').setDepth(100);
@@ -66,13 +78,17 @@ export class Hud {
     this.dashButton = scene.add.circle(0, 0, DASH_R, COLORS.cyan, 0.08).setStrokeStyle(2, COLORS.cyan, 0.7).setDepth(100).setInteractive();
     this.dashIcon = scene.add.image(0, 0, 'pu_dash').setDepth(100);
 
+    // 右上角暂停，触屏上也得有地方按
+    this.pauseButton = scene.add.circle(0, 0, PAUSE_R, COLORS.cyan, 0.08).setStrokeStyle(2, COLORS.cyan, 0.55).setDepth(100).setInteractive();
+    this.pauseIcon = scene.add.image(0, 0, 'pause').setDepth(100).setScale(0.8);
+
     this.layout();
   }
 
   /** 世界尺寸变化时重新摆位 */
   layout(): void {
     this.xpY = GAME_H - 22;
-    this.hpY = GAME_H - 58;
+    this.infoY = GAME_H - 58;
     const bx = GAME_W - 58;
     const bombY = GAME_H - 190;
     const dashY = GAME_H - 96;
@@ -82,10 +98,16 @@ export class Hud {
     this.stage.setPosition(GAME_W / 2, 28);
     this.combo.setPosition(GAME_W / 2, 56);
     this.bossLabel.setPosition(GAME_W / 2, 86);
-    this.buffs.setPosition(PAD, this.hpY - 56);
-    this.weapon.setPosition(PAD, this.hpY - 30);
+    this.buffs.setPosition(PAD, this.infoY - 56);
+    this.weapon.setPosition(PAD, this.infoY - 30);
     this.levelText.setPosition(PAD, this.xpY - 18);
     this.xpText.setPosition(GAME_W - PAD, this.xpY - 18);
+
+    // 血条贴在右上角，右边空出来给触屏按钮
+    this.hpW = Math.min(240, GAME_W * 0.34);
+    this.hpX = GAME_W - PAD - this.hpW;
+    this.hpY = 24;
+    this.hpText.setPosition(GAME_W - PAD - this.hpW / 2, this.hpY + HP_H / 2);
 
     this.bombButton.setPosition(bx, bombY);
     this.bombIcon.setPosition(bx, bombY - 4).setScale(1);
@@ -93,6 +115,10 @@ export class Hud {
 
     this.dashButton.setPosition(bx, dashY);
     this.dashIcon.setPosition(bx, dashY);
+
+    // 右上角，错开血条和 Boss 血条
+    this.pauseButton.setPosition(GAME_W - PAD - PAUSE_R, 116);
+    this.pauseIcon.setPosition(GAME_W - PAD - PAUSE_R, 116);
   }
 
   update(s: HudState): void {
@@ -119,11 +145,6 @@ export class Hud {
     this.levelText.setText(`LV ${s.level}`);
     this.xpText.setText(`EXP ${Math.floor(s.xp)} / ${s.xpNeed}`);
 
-    // 右上：剩余命数
-    let i = 0;
-    for (let n = 0; n < s.lives && i < this.icons.length; n++, i++) this.icons[i].setPosition(GAME_W - 26 - n * 30, 32).setVisible(true);
-    for (; i < this.icons.length; i++) this.icons[i].setVisible(false);
-
     const g = this.g;
     g.clear();
 
@@ -136,18 +157,46 @@ export class Hud {
     g.lineStyle(1, COLORS.cyan, 0.8);
     g.strokeRect(PAD, this.xpY, xw, 10);
 
-    // 船体耐久格 + 护盾
-    for (let n = 0; n < p.maxHp; n++) {
-      const on = n < p.hp;
-      const color = p.hp <= 1 ? COLORS.red : COLORS.green;
-      g.fillStyle(color, on ? 0.85 : 0.1);
-      g.fillRect(PAD + n * HP_CELL, this.hpY, HP_CELL - 6, 12);
-      g.lineStyle(1, color, 0.8);
-      g.strokeRect(PAD + n * HP_CELL, this.hpY, HP_CELL - 6, 12);
+    // 右上：血条
+    const ratio = Phaser.Math.Clamp(p.hp / p.maxHp, 0, 1);
+    if (this.lastHp < 0) this.hpShown = ratio;
+    if (p.hp < this.lastHp) this.hpFlashAt = now;
+    if (p.hp > this.lastHp) this.hpHealAt = now;
+    this.lastHp = p.hp;
+    // 滞后条：回血直接跟上，掉血时留一截白的慢慢追，一眼看得出这一下掉了多少
+    if (ratio >= this.hpShown) this.hpShown = ratio;
+    else this.hpShown = Math.max(ratio, this.hpShown - (this.hpShown - ratio) * 0.12);
+    const low = ratio <= 0.3;
+    const hpColor = low ? COLORS.red : COLORS.green;
+    g.fillStyle(COLORS.white, 0.07);
+    g.fillRect(this.hpX, this.hpY, this.hpW, HP_H);
+    if (this.hpShown > ratio) {
+      g.fillStyle(COLORS.white, 0.4);
+      g.fillRect(this.hpX + this.hpW * ratio, this.hpY, this.hpW * (this.hpShown - ratio), HP_H);
     }
+    g.fillStyle(hpColor, (low ? 0.72 + 0.24 * Math.sin(now / 140) : 0.9));
+    g.fillRect(this.hpX, this.hpY, this.hpW * ratio, HP_H);
+    if (now - this.hpFlashAt < 130) {
+      g.fillStyle(COLORS.white, 0.5);
+      g.fillRect(this.hpX, this.hpY, this.hpW, HP_H);
+    } else if (now - this.hpHealAt < 180) {
+      // 回血也闪一下（绿），不然血条往回涨容易被忽略
+      g.fillStyle(COLORS.green, 0.45);
+      g.fillRect(this.hpX - 2, this.hpY - 2, this.hpW + 4, HP_H + 4);
+    }
+    g.fillStyle(COLORS.white, 0.85);
+    g.fillRect(this.hpX + this.hpW * ratio - 1.5, this.hpY, 3, HP_H);
+    // 四等分的刻度，血量变化读起来更快
+    g.lineStyle(1, COLORS.cyan, 0.22);
+    for (let n = 1; n < 4; n++) g.lineBetween(this.hpX + (this.hpW * n) / 4, this.hpY, this.hpX + (this.hpW * n) / 4, this.hpY + HP_H);
+    g.lineStyle(1.5, hpColor, 0.9);
+    g.strokeRect(this.hpX, this.hpY, this.hpW, HP_H);
+    this.hpText.setText(`${Math.max(0, Math.ceil(p.hp))} / ${p.maxHp}`);
+
+    // 护盾挂在血条下面
     for (let n = 0; n < p.shield; n++) {
       g.lineStyle(2, COLORS.cyan, 0.9);
-      g.strokeCircle(PAD + p.maxHp * HP_CELL + 12 + n * 22, this.hpY + 6, 7);
+      g.strokeCircle(GAME_W - PAD - 9 - n * 22, this.hpY + HP_H + 13, 7);
     }
     if (p.shield > 0 && p.alive) {
       g.lineStyle(2, COLORS.cyan, 0.35 + 0.15 * Math.sin(now / 120));

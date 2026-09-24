@@ -1,8 +1,8 @@
 import Phaser from 'phaser';
-import { COLORS, DASH, PLAYER } from '../config';
+import { COLORS, DASH, LEECH, PLAYER } from '../config';
 import type { Player } from '../objects/Player';
 
-export type SkillId = 'gun' | 'rate' | 'power' | 'pierce' | 'bounce' | 'dash' | 'missile' | 'orb' | 'wingman' | 'lightning' | 'magnet' | 'regen' | 'hull' | 'xp' | 'repair';
+export type SkillId = 'gun' | 'rate' | 'power' | 'pierce' | 'bounce' | 'dash' | 'missile' | 'orb' | 'wingman' | 'lightning' | 'magnet' | 'regen' | 'hull' | 'leech' | 'xp' | 'repair';
 
 export interface SkillDef {
   id: SkillId;
@@ -23,7 +23,7 @@ export const SKILLS: SkillDef[] = [
   { id: 'rate', name: '急速装填', max: 5, color: COLORS.orange, icon: 'pu_rapid', desc: () => '主炮射速 +18%' },
   { id: 'power', name: '高能弹头', max: 5, color: COLORS.red, icon: 'pbullet', desc: () => '所有伤害 +25%' },
   { id: 'pierce', name: '穿甲弹', max: 3, color: COLORS.cyan, icon: 'pbullet', desc: () => '主炮子弹可多穿透 1 个敌人' },
-  { id: 'bounce', name: '弹射弹', max: 3, color: COLORS.blue, icon: 'pbullet', desc: () => '主炮子弹多反弹 1 次，存活时间 +0.5 秒' },
+  { id: 'bounce', name: '弹射弹', max: 3, color: COLORS.blue, icon: 'pbullet', desc: () => '主炮子弹多反弹 1 次，存活时间 +0.4 秒' },
   {
     id: 'dash', name: '相位冲刺', max: DASH.damage.length - 1, color: COLORS.cyan, icon: 'pu_dash',
     desc: (n) => `冲刺冷却 ${(DASH.cooldownMs[n] / 1000).toFixed(2)} 秒，撞击伤害 ${DASH.damage[n]}`,
@@ -49,12 +49,19 @@ export const SKILLS: SkillDef[] = [
     id: 'regen', name: '护盾发生器', max: 3, color: COLORS.cyan, icon: 'pu_shield',
     desc: (n) => `每 ${REGEN_INTERVAL_MS[n] / 1000} 秒自动充能 1 层护盾`,
   },
-  { id: 'hull', name: '强化船体', max: 3, color: COLORS.green, icon: 'pu_heal', desc: () => '船体上限 +1 并完全修复' },
+  { id: 'hull', name: '强化船体', max: 3, color: COLORS.green, icon: 'pu_heal', desc: () => `船体上限 +${PLAYER.hullHp} 并完全修复` },
+  {
+    id: 'leech', name: '吸血装甲', max: 3, color: COLORS.green, icon: 'pu_heal',
+    desc: (n) => `击杀敌机回复 ${LEECH.heal[n]} 点船体（越硬的敌人回得越多）`,
+  },
   { id: 'xp', name: '学习芯片', max: 3, color: COLORS.blue, icon: 'pu_xp', desc: () => '经验获取 +25%' },
 ];
 
+/** 保底选项每次回多少血 */
+const REPAIR_HP = 40;
+
 /** 所有技能都满级后的保底选项 */
-const REPAIR: SkillDef = { id: 'repair', name: '紧急维修', max: Infinity, color: COLORS.green, icon: 'pu_heal', desc: () => '修复 2 格船体，获得 1000 分' };
+const REPAIR: SkillDef = { id: 'repair', name: '紧急维修', max: Infinity, color: COLORS.green, icon: 'pu_heal', desc: () => `回复 ${REPAIR_HP} 点船体，获得 1000 分` };
 
 export function skillLevel(p: Player, id: SkillId): number {
   return id === 'gun' ? p.weapon - 1 : p.skills[id];
@@ -75,10 +82,11 @@ export function applySkill(p: Player, id: SkillId): void {
       return;
     case 'hull':
       p.skills.hull++;
+      // 上限涨了，顺手补满
       p.hp = p.maxHp;
       return;
     case 'repair':
-      p.hp = Math.min(p.maxHp, p.hp + 2);
+      p.hp = Math.min(p.maxHp, p.hp + REPAIR_HP);
       return;
     default:
       p.skills[id]++;

@@ -7,7 +7,7 @@ import sys
 from playwright.sync_api import sync_playwright
 
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:4173/"
-OUT = sys.argv[2] if len(sys.argv) > 2 else "."
+OUT = sys.argv[2] if len(sys.argv) > 2 else "shots"
 
 SNAPSHOT = """() => {
     const s = window.game.scene.getScene('Game');
@@ -76,11 +76,17 @@ with sync_playwright() as p:
     page.wait_for_timeout(900)
     print("回到竖屏:", page.evaluate(SNAPSHOT))
 
-    # 直接把 Boss 打残，看击破结算与满地的经验晶体
+    # 把 Boss 打残，机身挪到它正下方并把机头对准它，看击破结算与满地的经验晶体
+    # （只设 hp=1 是不够的：机身当时在墙角、机头朝哪全看运气，子弹未必打得中）
     page.evaluate(
         """() => {
             const s = window.game.scene.getScene('Game');
-            if (s.boss) s.boss.hp = 1;
+            const b = s.boss;
+            if (!b) return;
+            b.hp = 1;
+            const p = s.player;
+            p.setPosition(b.x, b.y + 260);
+            p.setRotation(Math.atan2(b.y - p.y, b.x - p.x) + Math.PI / 2);
         }"""
     )
     page.wait_for_timeout(1200)

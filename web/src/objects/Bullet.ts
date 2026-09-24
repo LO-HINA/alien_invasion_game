@@ -69,17 +69,18 @@ export class Bullet extends Phaser.Physics.Arcade.Sprite {
         this.kill();
         return;
       }
-      const m = BULLET.margin;
+      // 场上最多几百颗子弹，这里每帧都跑：bounds 查一次、body 转一次，别放进 helper 里重复做
+      const body = this.body as Phaser.Physics.Arcade.Body;
       const b = this.scene.physics.world.bounds;
+      const m = BULLET.margin;
       // 两条轴都要判，所以不能用 || 短路
-      const hitX = this.bounceX(b.left + m, b.right - m);
-      const hitY = this.bounceY(b.top + m, b.bottom - m);
+      const hitX = this.bounceX(body, b.left + m, b.right - m);
+      const hitY = this.bounceY(body, b.top + m, b.bottom - m);
       if (hitX || hitY) {
         if (this.bounces < 0) {
           this.kill();
           return;
         }
-        const body = this.body as Phaser.Physics.Arcade.Body;
         this.setRotation(Math.atan2(body.velocity.y, body.velocity.x));
       }
     }
@@ -87,8 +88,7 @@ export class Bullet extends Phaser.Physics.Arcade.Sprite {
     if (this.x < -60 || this.x > GAME_W + 60 || this.y < -60 || this.y > GAME_H + 60) this.kill();
   }
 
-  private bounceX(lo: number, hi: number): boolean {
-    const body = this.body as Phaser.Physics.Arcade.Body;
+  private bounceX(body: Phaser.Physics.Arcade.Body, lo: number, hi: number): boolean {
     if (this.x < lo && body.velocity.x < 0) {
       this.x = lo;
       body.velocity.x = -body.velocity.x;
@@ -102,8 +102,7 @@ export class Bullet extends Phaser.Physics.Arcade.Sprite {
     return true;
   }
 
-  private bounceY(lo: number, hi: number): boolean {
-    const body = this.body as Phaser.Physics.Arcade.Body;
+  private bounceY(body: Phaser.Physics.Arcade.Body, lo: number, hi: number): boolean {
     if (this.y < lo && body.velocity.y < 0) {
       this.y = lo;
       body.velocity.y = -body.velocity.y;

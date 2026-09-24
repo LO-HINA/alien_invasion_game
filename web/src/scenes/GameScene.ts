@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { BULLET, COLORS, COMBO_WINDOW_MS, GAME_H, GAME_W, MAX_MULTIPLIER, PLAYER, XP_PICKUP, xpToNext } from '../config';
+import { BULLET, COLORS, COMBO_WINDOW_MS, GAME_H, GAME_W, HEAL_AMOUNT, hex, HIT, LEECH, MAX_MULTIPLIER, PLAYER, XP_PICKUP, xpToNext } from '../config';
 import { Arsenal } from '../objects/Arsenal';
 import { Boss } from '../objects/Boss';
 import { Bullet, type BulletOpts } from '../objects/Bullet';
@@ -14,7 +14,7 @@ import { neonText } from '../systems/ui';
 import { Hud } from './Hud';
 
 type Phase = 'waves' | 'boss-wait' | 'boss' | 'clear' | 'over';
-type WavePattern = 'row' | 'column' | 'v' | 'sine' | 'shooters' | 'chargers' | 'tank' | 'swarm';
+type WavePattern = 'row' | 'column' | 'v' | 'sine' | 'shooters' | 'chargers' | 'tank' | 'swarm' | 'snipers' | 'spinners' | 'splitters' | 'bombers';
 /** 敌机从哪条边进场 */
 type EntrySide = 'top' | 'right' | 'bottom' | 'left';
 
@@ -27,7 +27,11 @@ const WAVE_UNLOCK: [WavePattern, number][] = [
   ['shooters', 1],
   ['chargers', 2],
   ['tank', 2],
+  ['snipers', 2],
+  ['splitters', 2],
   ['swarm', 3],
+  ['spinners', 3],
+  ['bombers', 3],
 ];
 
 // 四边出现概率，正面仍然是主要压力来源
@@ -39,6 +43,13 @@ const SIDE_WEIGHT: [EntrySide, number][] = [
 ];
 
 type KeyName = 'W' | 'A' | 'S' | 'D' | 'UP' | 'DOWN' | 'LEFT' | 'RIGHT' | 'X' | 'K' | 'P' | 'ESC' | 'M' | 'SPACE' | 'SHIFT' | 'F';
+
+/** 爆炸光环池大小 */
+const RING_POOL = 24;
+/** 光环起始缩放，和以前 Tween 的起点一致 */
+const RING_FROM = 0.1;
+/** 一帧最多出几条飘字：击杀密集时超出的攒到下一帧合并显示 */
+const POPUP_PER_FRAME = 3;
 
 export class GameScene extends Phaser.Scene {
   player!: Player;
@@ -55,12 +66,21 @@ export class GameScene extends Phaser.Scene {
   private keys!: Record<KeyName, Phaser.Input.Keyboard.Key>;
   private emitters = new Map<number, Phaser.GameObjects.Particles.ParticleEmitter>();
   private drag?: { px: number; py: number; sx: number; sy: number };
+  /** 爆炸光环池：一帧炸死一片时不用逐个 new Image + Tween */
+  private rings: { img: Phaser.GameObjects.Image; t: number; dur: number; to: number }[] = [];
+  private ringAt = 0;
+  /** 飘字按尺寸池化，复用 Text 就不必反复重建画布贴图 */
+  private popupPool = new Map<number, Phaser.GameObjects.Text[]>();
+  /** 本帧还能出几条飘字，防止一帧内建几十个 Text */
+  private popupBudget = 0;
+  /** 没来得及显示的分数，攒到下一帧合成一条 */
+  private pendingScore = 0;
+  private readonly pendingScoreAt = new Phaser.Math.Vector2();
 
   private phase: Phase = 'waves';
   private stage = 1;
   private score = 0;
   private high = 0;
-  private lives = PLAYER.lives;
   private bombs = PLAYER.bombs;
   private combo = 0;
   private comboUntil = 0;
@@ -88,7 +108,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private get wavesThisStage(): number {
-    return Math.min(18, 8 + this.stage * 2);
+    return Math.min(30, 12 + this.stage * 3);
   }
 
   get currentBoss(): Boss | undefined {
@@ -100,7 +120,6 @@ export class GameScene extends Phaser.Scene {
     this.stage = 1;
     this.score = 0;
     this.high = loadHighScore();
-    this.lives = PLAYER.lives;
     this.bombs = PLAYER.bombs;
     this.combo = 0;
     this.waveCount = 0;
@@ -113,14 +132,18 @@ export class GameScene extends Phaser.Scene {
     this.dashBossAt = 0;
     this.emitters = new Map();
     this.drag = undefined;
+    this.pendingScore = 0;
+    this.popupBudget = 0;
+    this.popupPool = new Map();
+    this.buildRingPool();
 
     this.cameras.main.fadeIn(300, 5, 3, 13);
     this.physics.world.setBounds(0, 0, GAME_W, GAME_H);
     this.starfield = new Starfield(this);
 
     this.pBullets = this.physics.add.group({ classType: Bullet, maxSize: 400 });
-    this.eBullets = this.physics.add.group({ classType: Bullet, maxSize: 600 });
-    this.enemies = this.physics.add.group({ classType: Enemy, maxSize: 150, runChildUpdate: true });
+    this.eBullets = this.physics.add.group({ classType: Bullet, maxSize: 900 });
+    this.enemies = this.physics.add.group({ classType: Enemy, maxSize: 320, runChildUpdate: true });
     this.powerups = this.physics.add.group({ classType: PowerUp, maxSize: 40 });
     this.xpOrbs = this.physics.add.group({ classType: PowerUp, maxSize: XP_PICKUP.maxOrbs });
     this.player = new Player(this, GAME_W / 2, GAME_H * 0.68);
@@ -136,7 +159,7 @@ export class GameScene extends Phaser.Scene {
       const bullet = b as unknown as Bullet;
       if (!bullet.active || !this.player.alive || this.player.invulnerable) return;
       bullet.kill();
-      this.hurtPlayer();
+      this.hurtPlayer(HIT.bullet);
     });
     this.physics.add.overlap(this.player, this.enemies, (_p, e) => {
       const enemy = e as unknown as Enemy;
@@ -155,7 +178,7 @@ export class GameScene extends Phaser.Scene {
         return;
       }
       if (p.invulnerable) return;
-      this.hurtPlayer();
+      this.hurtPlayer(HIT.ram);
       this.hitEnemy(enemy, 8);
     });
     const pickup = (_p: unknown, u: unknown) => {
@@ -230,6 +253,10 @@ export class GameScene extends Phaser.Scene {
         this.tryDash();
         return;
       }
+      if (over.includes(this.hud.pauseButton)) {
+        this.pauseGame();
+        return;
+      }
       this.drag = { px: ptr.x, py: ptr.y, sx: this.player.x, sy: this.player.y };
       this.player.dragTarget = new Phaser.Math.Vector2(this.player.x, this.player.y);
     });
@@ -247,16 +274,21 @@ export class GameScene extends Phaser.Scene {
 
   update(time: number, delta: number): void {
     this.starfield.update(delta);
+    this.updateRings(delta);
+    // 碰撞结算在本帧的 scene.update 之前就跑完了，这里补满的是下一帧的额度
+    this.popupBudget = POPUP_PER_FRAME;
 
     const p = this.player;
     if (p.alive) {
-      p.move(this.keys);
+      p.move(this.keys, delta);
       p.updateBlink(time);
       const shots = p.tryFire(time);
       if (shots.length) {
         const bounces = BULLET.bounces + p.skills.bounce;
-        const lifeMs = BULLET.lifeMs + p.skills.bounce * 500;
-        for (const s of shots) this.firePlayerBullet(s.x, s.y, s.a, PLAYER.bulletSpeed, 'pbullet', p.damageMul, p.skills.pierce, { bounces, lifeMs });
+        const lifeMs = BULLET.lifeMs + p.skills.bounce * 400;
+        // 一轮三发起步，所以单发伤害低，靠密度打
+        const dmg = PLAYER.bulletDamage * p.damageMul;
+        for (const s of shots) this.firePlayerBullet(s.x, s.y, s.a, PLAYER.bulletSpeed, 'pbullet', dmg, p.skills.pierce, { bounces, lifeMs });
         audio.shoot();
       }
       this.pullPowerUps();
@@ -271,7 +303,6 @@ export class GameScene extends Phaser.Scene {
       score: this.score,
       high: this.high,
       stage: this.stage,
-      lives: this.lives,
       bombs: this.bombs,
       multiplier: this.multiplier,
       level: this.level,
@@ -291,7 +322,7 @@ export class GameScene extends Phaser.Scene {
       if (this.waveCount < this.wavesThisStage) {
         this.spawnWave();
         this.waveCount++;
-        this.nextWaveAt = time + Math.max(1300, 2800 - this.stage * 150);
+        this.nextWaveAt = time + Math.max(750, 1900 - this.stage * 120);
       } else {
         // 不要求清光敌人，短暂间隔后 Boss 直接登场
         this.phase = 'boss-wait';
@@ -332,7 +363,14 @@ export class GameScene extends Phaser.Scene {
     return 'top';
   }
 
+  /** 一波 = 一组编队。关数上去之后会同一拍再来一两组，从别的边压过来 */
   private spawnWave(): void {
+    this.wavePattern();
+    if (this.stage >= 2 && Math.random() < Math.min(0.55, 0.18 + this.stage * 0.1)) this.wavePattern();
+    if (this.stage >= 4 && Math.random() < 0.3) this.wavePattern();
+  }
+
+  private wavePattern(): void {
     const pool = WAVE_UNLOCK.filter(([, s]) => this.stage >= s).map(([p]) => p);
     const pattern = Phaser.Utils.Array.GetRandom(pool) as WavePattern;
     const side = this.pickSide();
@@ -341,19 +379,19 @@ export class GameScene extends Phaser.Scene {
 
     switch (pattern) {
       case 'row': {
-        const n = 5 + Math.min(2, this.stage - 1);
+        const n = 10 + Math.min(4, this.stage);
         for (let i = 0; i < n; i++) this.spawn(side, 'drone', (span * (i + 0.5)) / n, (i % 2) * 40);
         break;
       }
       case 'column': {
         const c = Phaser.Math.Between(80, span - 80);
-        for (let i = 0; i < 5 + Math.min(3, this.stage); i++) this.spawn(side, 'drone', c, i * 55);
+        for (let i = 0; i < 9 + Math.min(5, this.stage); i++) this.spawn(side, 'drone', c, i * 55);
         break;
       }
       case 'v': {
         const cx = Phaser.Math.Clamp(Phaser.Math.Between(0, span), 180, span - 180);
-        for (let i = 0; i < 7; i++) {
-          const k = i - 3;
+        for (let i = 0; i < 11; i++) {
+          const k = i - 5;
           this.spawn(side, 'drone', cx + k * 48, Math.abs(k) * 45);
         }
         break;
@@ -361,25 +399,48 @@ export class GameScene extends Phaser.Scene {
       case 'sine': {
         const amp = Phaser.Math.Between(60, 130);
         const cx = Phaser.Math.Clamp(Phaser.Math.Between(0, span), amp + 50, span - amp - 50);
-        for (let i = 0; i < 7; i++) this.spawn(side, 'wave', cx, i * 60, { amp, phase: -i * 0.5 });
+        for (let i = 0; i < 11; i++) this.spawn(side, 'wave', cx, i * 60, { amp, phase: -i * 0.5 });
         break;
       }
       case 'shooters': {
-        const n = 2 + Math.min(2, Math.floor(this.stage / 2));
+        const n = 4 + Math.min(3, Math.floor(this.stage / 2));
         for (let i = 0; i < n; i++) this.spawn(side, 'shooter', (span * (i + 0.5)) / n, i * 30, { phase: i });
         break;
       }
-      case 'chargers':
-        for (let i = 0; i < 3; i++) this.spawn(side, 'charger', Phaser.Math.Between(80, span - 80), i * 90);
+      case 'chargers': {
+        const n = 5 + Math.min(3, this.stage - 2);
+        for (let i = 0; i < n; i++) this.spawn(side, 'charger', Phaser.Math.Between(80, span - 80), i * 80);
         break;
+      }
       case 'tank': {
         const cx = Phaser.Math.Clamp(Phaser.Math.Between(0, span), 160, span - 160);
         this.spawn(side, 'tank', cx, 20);
-        for (const d of [-90, 90]) this.spawn(side, 'drone', cx + d, 100);
+        for (const d of [-150, -90, -30, 30, 90, 150]) this.spawn(side, 'drone', cx + d, 100);
+        break;
+      }
+      case 'snipers': {
+        // 隔着大半个屏幕点名，得靠不停移动把枪线甩掉
+        const n = 2 + Math.min(2, this.stage - 2);
+        for (let i = 0; i < n; i++) this.spawn(side, 'sniper', (span * (i + 0.5)) / n, i * 40, { phase: i });
+        break;
+      }
+      case 'spinners': {
+        const n = 2 + (this.stage >= 5 ? 1 : 0);
+        for (let i = 0; i < n; i++) this.spawn(side, 'spinner', (span * (i + 0.5)) / n, i * 60, { phase: i });
+        break;
+      }
+      case 'splitters':
+        for (let i = 0; i < 6; i++) this.spawn(side, 'splitter', (span * (i + 0.5)) / 6, (i % 2) * 50);
+        break;
+      case 'bombers': {
+        const cx = Phaser.Math.Clamp(Phaser.Math.Between(0, span), 160, span - 160);
+        this.spawn(side, 'bomber', cx, 20);
+        if (this.stage >= 5) this.spawn(side, 'bomber', cx + 160, 90);
+        for (const d of [-110, 0, 110]) this.spawn(side, 'drone', cx + d, 120);
         break;
       }
       case 'swarm':
-        for (let i = 0; i < 12; i++) this.spawn(side, i % 3 === 0 ? 'wave' : 'drone', Phaser.Math.Between(60, span - 60), i * 35, { amp: 50 });
+        for (let i = 0; i < 22; i++) this.spawn(side, i % 3 === 0 ? 'wave' : 'drone', Phaser.Math.Between(60, span - 60), i * 35, { amp: 50 });
         break;
     }
   }
@@ -413,7 +474,7 @@ export class GameScene extends Phaser.Scene {
             }
             return;
           }
-          if (!p.invulnerable) this.hurtPlayer();
+          if (!p.invulnerable) this.hurtPlayer(HIT.boss);
         }),
       ];
     });
@@ -435,6 +496,8 @@ export class GameScene extends Phaser.Scene {
     this.clearEnemyBullets();
     boss.setVelocity(0, 0);
     this.addScore(5000 * this.stage, boss.x, boss.y, false);
+    // 打掉 Boss 大补一口
+    this.healPlayer(LEECH.boss);
     // 一地的经验晶体，炸完自己去捡
     const total = 15 + this.stage * 5;
     for (let i = 0; i < total; i += 5) {
@@ -496,6 +559,14 @@ export class GameScene extends Phaser.Scene {
     for (let i = 0; i < count; i++) this.fireEnemy(x, y, base + (i - (count - 1) / 2) * spread, speed, texture);
   }
 
+  /** 狙击机开火时的一道光，一闪就没，让这一发有来处 */
+  tracer(x1: number, y1: number, x2: number, y2: number, color: number): void {
+    const g = this.add.graphics().setDepth(22).setBlendMode(Phaser.BlendModes.ADD);
+    g.lineStyle(1.5, color, 0.9);
+    g.lineBetween(x1, y1, x2, y2);
+    this.tweens.add({ targets: g, alpha: 0, duration: 240, onComplete: () => g.destroy() });
+  }
+
   activeEnemies(): Enemy[] {
     return this.enemies.getMatching('active', true) as Enemy[];
   }
@@ -506,6 +577,30 @@ export class GameScene extends Phaser.Scene {
 
   activePlayerBullets(): Bullet[] {
     return this.pBullets.getMatching('active', true) as Bullet[];
+  }
+
+  /** 逐颗遍历场上的玩家子弹。不新建数组，但回调里不能把子弹从组里摘掉（kill 只是置 inactive，安全） */
+  eachPlayerBullet(fn: (b: Bullet) => void): void {
+    for (const o of this.pBullets.getChildren()) {
+      const b = o as Bullet;
+      if (b.active) fn(b);
+    }
+  }
+
+  /** 同上，遍历敌弹 */
+  eachEnemyBullet(fn: (b: Bullet) => void): void {
+    for (const o of this.eBullets.getChildren()) {
+      const b = o as Bullet;
+      if (b.active) fn(b);
+    }
+  }
+
+  /** 同上，遍历敌机 */
+  eachEnemy(fn: (e: Enemy) => void): void {
+    for (const o of this.enemies.getChildren()) {
+      const e = o as Enemy;
+      if (e.active) fn(e);
+    }
   }
 
   /** 清除敌弹；传 radius 时只清玩家附近的 */
@@ -532,11 +627,31 @@ export class GameScene extends Phaser.Scene {
     this.explode(e.x, e.y, def.color, e.kind === 'tank' ? 1.5 : 0.7);
     audio.explode(e.kind === 'tank');
     if (e.kind === 'tank') this.cameras.main.shake(200, 0.008);
+    // 分裂球：打爆不算完，裂出来的两架小机接着往外飞
+    if (e.kind === 'splitter') this.splitEnemy(e);
     this.addScore(def.score, e.x, e.y);
     // 经验掉在原地，得自己飞过去捡
     this.dropXp(e.x, e.y, def.xp);
     if (Math.random() < def.dropChance) this.dropPowerUp(e.x, e.y);
+    this.leech(def.xp);
     e.disableBody(true, true);
+  }
+
+  /** 吸血装甲：击杀回血，越硬的敌人回得越多（按它的经验值折算） */
+  private leech(xp: number): void {
+    const lv = this.player.skills.leech;
+    if (lv <= 0) return;
+    this.healPlayer(LEECH.heal[lv] + Math.floor(xp / LEECH.xpDiv));
+  }
+
+  /** 分裂球被打爆：顺着原来的方向朝两侧各散出一架小机 */
+  private splitEnemy(e: Enemy): void {
+    const v = (e.body as Phaser.Physics.Arcade.Body).velocity;
+    const ang = v.lengthSq() > 0 ? Math.atan2(v.y, v.x) : Math.PI / 2;
+    for (const s of [-1, 1]) {
+      const a = ang + s * 0.55;
+      this.spawnEnemy('drone', e.x + Math.cos(a) * 26, e.y + Math.sin(a) * 26, { angle: a });
+    }
   }
 
   private addScore(base: number, x: number, y: number, combo = true): void {
@@ -546,8 +661,17 @@ export class GameScene extends Phaser.Scene {
     }
     const gained = base * (combo ? this.multiplier : 1);
     this.score += gained;
-    const t = neonText(this, x, y, `+${gained}`, 14, COLORS.yellow).setDepth(50);
-    this.tweens.add({ targets: t, y: y - 40, alpha: 0, duration: 700, onComplete: () => t.destroy() });
+    // 一波打爆一片时飘字会糊成一片，攒起来合成一条显示
+    this.pendingScore += gained;
+    this.pendingScoreAt.set(x, y);
+    this.flushScorePopup();
+  }
+
+  /** 分数飘字：额度够才出，出完清空累计（不够就留到下一帧） */
+  private flushScorePopup(): void {
+    if (this.pendingScore <= 0) return;
+    if (!this.floatText(this.pendingScoreAt.x, this.pendingScoreAt.y, `+${this.pendingScore}`, COLORS.yellow, 14)) return;
+    this.pendingScore = 0;
   }
 
   private gainXp(amount: number): void {
@@ -594,7 +718,8 @@ export class GameScene extends Phaser.Scene {
     this.input.keyboard?.resetKeys();
   }
 
-  private hurtPlayer(): void {
+  /** 扣血。护盾先顶，护盾没破就不掉血 */
+  private hurtPlayer(dmg: number): void {
     const p = this.player;
     this.cameras.main.shake(180, 0.01);
     if (p.shield > 0) {
@@ -604,13 +729,21 @@ export class GameScene extends Phaser.Scene {
       this.explode(p.x, p.y, COLORS.cyan, 0.5);
       return;
     }
-    p.hp--;
+    p.hp -= dmg;
     p.invulnUntil = this.time.now + PLAYER.hitInvulnMs;
     audio.hurt();
     this.flash(p);
     // 受击后清掉身边的子弹，避免连续挨打
     this.clearEnemyBullets(160);
     if (p.hp <= 0) this.killPlayer();
+  }
+
+  /** 回血：满了就不飘字，免得刷屏 */
+  private healPlayer(amount: number): void {
+    const p = this.player;
+    if (amount <= 0 || !p.alive || p.hp >= p.maxHp) return;
+    p.hp = Math.min(p.maxHp, p.hp + amount);
+    this.floatText(p.x, p.y - 30, `+${amount}`, COLORS.green, 13);
   }
 
   private killPlayer(): void {
@@ -621,26 +754,16 @@ export class GameScene extends Phaser.Scene {
     audio.explode(true);
     this.cameras.main.shake(400, 0.02);
     p.disableBody(true, true);
-    this.lives--;
+    // 机身一旦 inactive，Player.preUpdate 就不再跑，炮塔得手动收掉
+    p.turret.setVisible(false);
     this.combo = 0;
 
-    if (this.lives <= 0) {
-      this.phase = 'over';
-      this.time.delayedCall(1400, () => {
-        this.physics.pause();
-        this.scene.pause();
-        this.scene.launch('GameOver', { score: this.score, stage: this.stage, level: this.level });
-      });
-      return;
-    }
-    this.time.delayedCall(1300, () => {
-      this.clearEnemyBullets();
-      p.enableBody(true, GAME_W / 2, GAME_H * 0.68, true, true);
-      p.alive = true;
-      p.hp = p.maxHp;
-      p.weapon = Math.max(1, p.weapon - 1);
-      p.invulnUntil = this.time.now + PLAYER.respawnInvulnMs;
-      p.engine.emitting = true;
+    // 血条见底就结束，不再有复活
+    this.phase = 'over';
+    this.time.delayedCall(1400, () => {
+      this.physics.pause();
+      this.scene.pause();
+      this.scene.launch('GameOver', { score: this.score, stage: this.stage, level: this.level });
     });
   }
 
@@ -676,12 +799,14 @@ export class GameScene extends Phaser.Scene {
   /** 经验晶体掉在原地，走位过去才吸得到 */
   private dropXp(x: number, y: number, value: number): void {
     if (value <= 0) return;
-    const live = this.xpOrbs.getMatching('active', true) as PowerUp[];
-    if (live.length >= XP_PICKUP.mergeLimit) {
+    // 只是想知道「够不够多」，countActive 不会像 getMatching 那样建数组
+    if (this.xpOrbs.countActive(true) >= XP_PICKUP.mergeLimit) {
       // 场上晶体太多了，就近合并，避免越堆越掉帧
       let best: PowerUp | undefined;
       let bestD = XP_PICKUP.mergeRadius * XP_PICKUP.mergeRadius;
-      for (const pu of live) {
+      for (const o of this.xpOrbs.getChildren()) {
+        const pu = o as PowerUp;
+        if (!pu.active) continue;
         const d = Phaser.Math.Distance.Squared(pu.x, pu.y, x, y);
         if (d < bestD) {
           bestD = d;
@@ -700,14 +825,17 @@ export class GameScene extends Phaser.Scene {
     const p = this.player;
     const range = MAGNET_RANGE[p.skills.magnet];
     const range2 = range * range;
-    const suck = (list: Phaser.GameObjects.GameObject[]): void => {
-      for (const o of list) {
-        const pu = o as PowerUp;
-        if (Phaser.Math.Distance.Squared(pu.x, pu.y, p.x, p.y) < range2) pu.attract(p.x, p.y);
-      }
-    };
-    suck(this.powerups.getMatching('active', true));
-    suck(this.xpOrbs.getMatching('active', true));
+    this.suck(this.powerups, p.x, p.y, range2);
+    this.suck(this.xpOrbs, p.x, p.y, range2);
+  }
+
+  /** 吸附范围内才拉过来。直接遍历组内数组，不额外分配 */
+  private suck(group: Phaser.Physics.Arcade.Group, px: number, py: number, range2: number): void {
+    for (const o of group.getChildren()) {
+      const pu = o as PowerUp;
+      if (!pu.active) continue;
+      if (Phaser.Math.Distance.Squared(pu.x, pu.y, px, py) < range2) pu.attract(px, py);
+    }
   }
 
   private collect(pu: PowerUp): void {
@@ -739,7 +867,7 @@ export class GameScene extends Phaser.Scene {
         this.bombs = Math.min(PLAYER.maxBombs, this.bombs + 1);
         break;
       case 'heal':
-        p.hp = Math.min(p.maxHp, p.hp + 2);
+        this.healPlayer(HEAL_AMOUNT);
         break;
       case 'rapid':
         p.rapidUntil = Math.max(now, p.rapidUntil) + 8000;
@@ -747,18 +875,43 @@ export class GameScene extends Phaser.Scene {
       case 'star':
         p.starUntil = Math.max(now, p.starUntil) + 6000;
         break;
-      case 'life':
-        this.lives = Math.min(9, this.lives + 1);
-        break;
       default:
         break;
     }
     this.floatText(p.x, p.y - 44, label, POWER_INFO[kind].color, 18);
   }
 
-  private floatText(x: number, y: number, text: string, color: number, size: number): void {
-    const t = neonText(this, x, y, text, size, color).setDepth(50);
-    this.tweens.add({ targets: t, y: y - 56, alpha: 0, duration: 900, onComplete: () => t.destroy() });
+  /** 飘字：带额度限制和对象池，返回是否真的显示出来了 */
+  private floatText(x: number, y: number, text: string, color: number, size: number): boolean {
+    if (this.popupBudget <= 0) return false;
+    this.popupBudget--;
+    const t = this.takePopup(size);
+    t.setText(text).setColor(hex(color)).setShadow(0, 0, hex(color), Math.max(8, size * 0.5), true, true);
+    t.setPosition(x, y).setAlpha(1).setVisible(true);
+    this.tweens.add({
+      targets: t,
+      y: y - 56,
+      alpha: 0,
+      duration: 900,
+      onComplete: () => {
+        t.setVisible(false);
+        (this.popupPool.get(size) ?? []).push(t);
+      },
+    });
+    return true;
+  }
+
+  /** 按字号从池里取一个 Text，取不到才新建 */
+  private takePopup(size: number): Phaser.GameObjects.Text {
+    let free = this.popupPool.get(size);
+    if (!free) {
+      free = [];
+      this.popupPool.set(size, free);
+    }
+    const pooled = free.pop();
+    if (!pooled) return neonText(this, 0, 0, '', size, COLORS.white).setDepth(50);
+    this.tweens.killTweensOf(pooled);
+    return pooled;
   }
 
   // ───────── 特效 ─────────
@@ -787,9 +940,36 @@ export class GameScene extends Phaser.Scene {
 
   private explode(x: number, y: number, color: number, size = 1): void {
     this.emitter(color).explode(Math.round(10 + 22 * size), x, y);
-    if (size >= 0.5) {
-      const ring = this.add.image(x, y, 'ring').setTint(color).setScale(0.1).setBlendMode(Phaser.BlendModes.ADD).setDepth(19);
-      this.tweens.add({ targets: ring, scale: 0.6 * size, alpha: 0, duration: 380, ease: 'Cubic.out', onComplete: () => ring.destroy() });
+    if (size >= 0.5) this.showRing(x, y, color, size);
+  }
+
+  /** 光环池：轮流取用，够一帧内几十次爆炸同时用了 */
+  private buildRingPool(): void {
+    this.rings = [];
+    this.ringAt = 0;
+    for (let i = 0; i < RING_POOL; i++) {
+      const img = this.add.image(0, 0, 'ring').setVisible(false).setBlendMode(Phaser.BlendModes.ADD).setDepth(19);
+      this.rings.push({ img, t: 0, dur: 1, to: 1 });
+    }
+  }
+
+  private showRing(x: number, y: number, color: number, size: number): void {
+    const r = this.rings[this.ringAt];
+    this.ringAt = (this.ringAt + 1) % this.rings.length;
+    r.img.setPosition(x, y).setTint(color).setVisible(true).setAlpha(1).setScale(RING_FROM);
+    r.to = 0.6 * size;
+    r.t = 0;
+  }
+
+  /** 手动推进光环，比每个爆炸挂一个 Tween 便宜得多 */
+  private updateRings(delta: number): void {
+    for (const r of this.rings) {
+      if (!r.img.visible) continue;
+      r.t += delta;
+      const k = Math.min(1, r.t / r.dur);
+      const eased = 1 - (1 - k) * (1 - k) * (1 - k);
+      r.img.setScale(RING_FROM + (r.to - RING_FROM) * eased).setAlpha(1 - k);
+      if (k >= 1) r.img.setVisible(false);
     }
   }
 

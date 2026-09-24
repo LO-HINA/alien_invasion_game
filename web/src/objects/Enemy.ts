@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import { COLORS, GAME_H, GAME_W } from '../config';
 import type { GameScene } from '../scenes/GameScene';
 
-export type EnemyKind = 'drone' | 'wave' | 'shooter' | 'charger' | 'tank';
+export type EnemyKind = 'drone' | 'wave' | 'shooter' | 'charger' | 'tank' | 'sniper' | 'spinner' | 'splitter' | 'bomber';
 
 interface EnemyDef {
   hp: number;
@@ -20,6 +20,11 @@ export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
   shooter: { hp: 5, speed: 140, score: 300, xp: 3, color: COLORS.green, radius: 17, dropChance: 0.12 },
   charger: { hp: 3, speed: 160, score: 250, xp: 2, color: COLORS.red, radius: 15, dropChance: 0.08 },
   tank: { hp: 24, speed: 70, score: 1000, xp: 10, color: COLORS.purple, radius: 30, dropChance: 0.5 },
+  // 以下四种是后期才放出来的「有脾气」的敌机，各有各的威胁方式
+  sniper: { hp: 4, speed: 130, score: 420, xp: 4, color: COLORS.cyan, radius: 15, dropChance: 0.16 },
+  spinner: { hp: 7, speed: 85, score: 550, xp: 5, color: COLORS.purple, radius: 20, dropChance: 0.22 },
+  splitter: { hp: 3, speed: 140, score: 320, xp: 3, color: COLORS.magenta, radius: 17, dropChance: 0.12 },
+  bomber: { hp: 9, speed: 95, score: 650, xp: 6, color: COLORS.orange, radius: 22, dropChance: 0.28 },
 };
 
 export interface SpawnOpts {
@@ -48,6 +53,8 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
   private amp = 0;
   private freq = 0;
   private phase = 0;
+  /** 旋舞机撒弹的螺旋相位，出膛角每轮转一点 */
+  private spiral = 0;
   private dashAngle = Math.PI / 2;
   /** 前进方向 */
   private moveAngle = Math.PI / 2;
@@ -80,6 +87,7 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     this.amp = opts.amp ?? 120;
     this.freq = opts.freq ?? 2.2;
     this.phase = opts.phase ?? 0;
+    this.spiral = this.phase;
     this.moveAngle = opts.angle ?? Math.PI / 2;
     this.sx = x;
     this.sy = y;
@@ -133,8 +141,10 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
         this.setVelocity(ca * fwd + px * lat, sa * fwd + py * lat);
         this.rotation += dt;
         if (!leaving && onScreen && time >= this.nextFire) {
-          this.nextFire = time + 2000 * fireScale;
-          game.fireEnemyAimed(this.x, this.y, 220 + this.diff * 15, 'ebullet', this.diff > 2.2 ? 3 : 1, 0.22);
+          // 弹幕要密：一轮三发起步，后期再加两颗、间隔也更短
+          const heavy = this.diff > 1.6;
+          this.nextFire = time + (heavy ? 1300 : 1600) * fireScale;
+          game.fireEnemyAimed(this.x, this.y, 220 + this.diff * 15, 'ebullet', heavy ? 5 : 3, 0.2);
         }
         break;
       }
@@ -145,6 +155,8 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
             this.mode = 1;
             this.stateAt = time;
             this.setVelocity(0, 0);
+            // 蓄力的同时甩一轮，冲刺才有掩护
+            game.fireEnemyAimed(this.x, this.y, 240 + this.diff * 12, 'ebullet', 3, 0.24);
           }
         } else if (this.mode === 1) {
           // 蓄力：朝向玩家并闪烁，给玩家足够的反应时间
@@ -162,8 +174,68 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
         const lat = Math.sin(this.t * 0.8) * 30;
         this.setVelocity(ca * sp * 0.6 + px * lat, sa * sp * 0.6 + py * lat);
         if (onScreen && time >= this.nextFire) {
-          this.nextFire = time + 2400 * fireScale;
-          for (let i = -2; i <= 2; i++) game.fireEnemy(this.x + ca * 30, this.y + sa * 30, this.moveAngle + i * 0.2, 200 + this.diff * 12, 'ebullet2');
+          // 正面铺一道弧，逼玩家从侧面绕
+          this.nextFire = time + 1900 * fireScale;
+          for (let i = -3; i <= 3; i++) game.fireEnemy(this.x + ca * 30, this.y + sa * 30, this.moveAngle + i * 0.17, 200 + this.diff * 12, 'ebullet2');
+        }
+        break;
+      }
+      case 'sniper': {
+        // 停在远处不动，蓄力时闪烁并转向玩家，然后放一发又快又直的
+        const leaving = this.t > 11;
+        const station = Math.min(GAME_W, GAME_H) * 0.24;
+        const fwd = leaving ? sp * 2 : inward < station ? sp * 1.5 : 0;
+        const lat = Math.sin(this.t * 1.1 + this.phase) * 46;
+        this.setVelocity(ca * fwd + px * lat, sa * fwd + py * lat);
+        if (leaving || !onScreen) {
+          this.mode = 0;
+          this.setAlpha(1);
+          break;
+        }
+        if (this.mode === 0) {
+          if (time >= this.nextFire) {
+            this.mode = 1;
+            this.stateAt = time;
+          }
+        } else {
+          const ang = Phaser.Math.Angle.Between(this.x, this.y, game.player.x, game.player.y);
+          this.setRotation(ang - Math.PI / 2);
+          this.setAlpha(Math.floor(time / 70) % 2 ? 0.45 : 1);
+          if (time - this.stateAt > 700) {
+            this.mode = 0;
+            this.setAlpha(1);
+            this.nextFire = time + 1500 * fireScale;
+            // 枪线先到、子弹后到，这一发才躲得掉
+            game.tracer(this.x, this.y, game.player.x, game.player.y, this.def.color);
+            game.fireEnemy(this.x + Math.cos(ang) * 22, this.y + Math.sin(ang) * 22, ang, 480 + this.diff * 15, 'ebullet');
+          }
+        }
+        break;
+      }
+      case 'spinner': {
+        // 慢慢转着飘，一圈一圈往外撒弹
+        this.setVelocity(ca * sp + px * Math.sin(this.t * 0.9) * 40, sa * sp + py * Math.cos(this.t * 0.9) * 40);
+        this.rotation += dt * 2.2;
+        if (onScreen && time >= this.nextFire) {
+          this.nextFire = time + 480 * fireScale;
+          for (let i = 0; i < 3; i++) game.fireEnemy(this.x, this.y, this.spiral + (i * Math.PI * 2) / 3, 165 + this.diff * 8, 'ebullet2');
+          this.spiral += 0.55;
+        }
+        break;
+      }
+      case 'splitter': {
+        // 直来直去，靠「打爆会裂成两架小机」拖住玩家
+        this.setVelocity(ca * sp, sa * sp);
+        this.rotation += dt * 1.2;
+        break;
+      }
+      case 'bomber': {
+        // 慢悠悠压过来，隔一阵朝四面八方铺一圈弹
+        this.setVelocity(ca * sp * 0.8 + px * Math.sin(this.t * 0.7) * 26, sa * sp * 0.8 + py * Math.cos(this.t * 0.7) * 26);
+        if (onScreen && time >= this.nextFire) {
+          this.nextFire = time + 2100 * fireScale;
+          for (let i = 0; i < 8; i++) game.fireEnemy(this.x, this.y, this.spiral + (i / 8) * Math.PI * 2, 150 + this.diff * 10, 'ebullet2');
+          this.spiral += 0.39;
         }
         break;
       }

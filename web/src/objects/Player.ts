@@ -1,21 +1,35 @@
 import Phaser from 'phaser';
-import { COLORS, DASH, GAME_H, GAME_W, PLAYER } from '../config';
+import { COLORS, DASH, GAME_H, GAME_W, PLAYER, TURRET_FWD } from '../config';
 import type { SkillId } from '../systems/skills';
 
 type Keys = Record<'W' | 'A' | 'S' | 'D' | 'UP' | 'DOWN' | 'LEFT' | 'RIGHT', Phaser.Input.Keyboard.Key>;
 
-// 各火力等级的弹道：dx 为横向偏移，a 为相对正上方的偏角
-const PATTERNS: { dx: number; a: number }[][] = [
-  [{ dx: 0, a: 0 }],
-  [{ dx: -7, a: 0 }, { dx: 7, a: 0 }],
-  [{ dx: 0, a: 0 }, { dx: 0, a: -0.12 }, { dx: 0, a: 0.12 }],
-  [{ dx: -7, a: 0 }, { dx: 7, a: 0 }, { dx: 0, a: -0.18 }, { dx: 0, a: 0.18 }],
-  [{ dx: -7, a: 0 }, { dx: 7, a: 0 }, { dx: 0, a: -0.1 }, { dx: 0, a: 0.1 }, { dx: 0, a: -0.24 }, { dx: 0, a: 0.24 }],
+/**
+ * 每级齐射的「颗数 + 总张角（弧度）」。从 Lv1 起就是发散式的扇面：三颗朝三个方向散开，
+ * 越高级扇面越宽、颗数越多，所以近处能同时招呼几个目标，远处则会散成一张网。
+ */
+const VOLLEY: [number, number][] = [
+  [3, 0.30],
+  [4, 0.42],
+  [5, 0.54],
+  [6, 0.68],
+  [8, 0.92],
 ];
-const UP = -Math.PI / 2;
+/** 每级各颗子弹相对机头的偏角，从最左到最右均匀铺开 */
+const FAN: number[][] = VOLLEY.map(([n, spread]) => Array.from({ length: n }, (_, i) => (i / (n - 1) - 0.5) * spread));
+// 机身转向的角速度（弧度/秒）。瞄准就是机头方向，所以转得要比纯装饰快一些才跟手
+const TURN_SPEED = 24;
+/** 低于这个速度就不改朝向，免得站定时被噪声抖得乱转 */
+const TURN_MIN_SPEED = 30;
+/** 排气口在机尾多远 */
+const EXHAUST_BACK = 26 * PLAYER.scale;
+/** 炮口离机身中心多远（炮塔位置 + 炮管长度），子弹从这儿出去 */
+const MUZZLE_FWD = TURRET_FWD + 14 * PLAYER.scale;
+/** 判定点半径，比外形小得多，方便在弹幕里穿行 */
+const BODY_R = 5;
 
 function emptySkills(): Record<SkillId, number> {
-  return { gun: 0, rate: 0, power: 0, pierce: 0, bounce: 0, dash: 0, missile: 0, orb: 0, wingman: 0, lightning: 0, magnet: 0, regen: 0, hull: 0, xp: 0, repair: 0 };
+  return { gun: 0, rate: 0, power: 0, pierce: 0, bounce: 0, dash: 0, missile: 0, orb: 0, wingman: 0, lightning: 0, magnet: 0, regen: 0, hull: 0, leech: 0, xp: 0, repair: 0 };
 }
 
 export class Player extends Phaser.Physics.Arcade.Sprite {
@@ -42,33 +56,57 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   private dirX = 0;
   private dirY = -1;
   private nextGhost = 0;
+  /** 炮塔：机身自由转向，炮口永远朝上，保证「自动向上射击」读得懂 */
+  readonly turret: Phaser.GameObjects.Image;
   readonly engine: Phaser.GameObjects.Particles.ParticleEmitter;
+  private readonly exhaust = new Phaser.Math.Vector2();
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
     super(scene, x, y, 'player');
     scene.add.existing(this);
     scene.physics.add.existing(this);
     this.setCollideWorldBounds(true).setDepth(5);
-    // 判定点比外形小得多，方便在弹幕里穿行
-    (this.body as Phaser.Physics.Arcade.Body).setCircle(7, this.width / 2 - 7, this.height / 2 - 7);
+    (this.body as Phaser.Physics.Arcade.Body).setCircle(BODY_R, this.width / 2 - BODY_R, this.height / 2 - BODY_R);
 
+    this.turret = scene.add.image(x, y - TURRET_FWD, 'turret').setDepth(6).setBlendMode(Phaser.BlendModes.ADD);
     this.engine = scene.add.particles(0, 0, 'particle', {
       follow: this,
-      followOffset: { x: 0, y: 26 },
-      speedX: { min: -25, max: 25 },
-      speedY: { min: 160, max: 320 },
+      followOffset: { x: 0, y: EXHAUST_BACK },
+      // 朝机尾喷；朝向变了由 faceTowards 改 angle
+      speed: { min: 160, max: 320 },
+      angle: 90,
       lifespan: 260,
-      scale: { start: 0.55, end: 0 },
+      // 机体缩了，尾焰跟着缩，不然喷出来比机身还大
+      scale: { start: 0.55 * PLAYER.scale, end: 0 },
       alpha: { start: 0.9, end: 0 },
       color: [COLORS.white, COLORS.cyan, COLORS.magenta],
       blendMode: 'ADD',
       frequency: 14,
     });
     this.engine.setDepth(4);
+
+    // Arcade 是在 POST_UPDATE 才把 body 的坐标写回贴图的，所以要挂在这一步之后同步炮塔，
+    // 否则炮塔会用上一帧的机身位置，看起来永远差半个身位。
+    scene.events.on(Phaser.Scenes.Events.POST_UPDATE, this.syncTurret, this);
+    scene.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      scene.events.off(Phaser.Scenes.Events.POST_UPDATE, this.syncTurret, this);
+    });
+  }
+
+  /**
+   * 炮塔跟着机头转，子弹从它的炮口出去。
+   * 由 POST_UPDATE 驱动，保证和机身在同一帧、同一位置上。
+   */
+  private syncTurret(): void {
+    const a = this.aim;
+    this.turret
+      .setPosition(this.x + Math.cos(a) * TURRET_FWD, this.y + Math.sin(a) * TURRET_FWD)
+      .setRotation(this.rotation)
+      .setVisible(this.visible);
   }
 
   get maxHp(): number {
-    return PLAYER.maxHp + this.skills.hull;
+    return PLAYER.maxHp + this.skills.hull * PLAYER.hullHp;
   }
 
   get invulnerable(): boolean {
@@ -126,13 +164,14 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     return true;
   }
 
-  move(keys: Keys): void {
+  move(keys: Keys, delta: number): void {
     const now = this.scene.time.now;
     if (now < this.dashUntil) {
       this.setVelocity(this.dirX * DASH.speed, this.dirY * DASH.speed);
-      this.setRotation(Math.atan2(this.dirY, this.dirX) + Math.PI / 2);
+      this.faceTowards(Math.atan2(this.dirY, this.dirX), delta, true);
       this.engine.frequency = 3;
       this.ghost(now);
+      this.syncTurret();
       return;
     }
     this.engine.frequency = 14;
@@ -160,10 +199,22 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
       const len = Math.hypot(vx, vy);
       this.dirX = vx / len;
       this.dirY = vy / len;
+      // 够快才改朝向，站定时保持机头方向不乱晃
+      if (len > TURN_MIN_SPEED) this.faceTowards(Math.atan2(vy, vx), delta);
     }
     this.setVelocity(vx, vy);
-    // 左右移动时机身倾斜
-    this.setRotation(Phaser.Math.Linear(this.rotation, Phaser.Math.Clamp(vx / PLAYER.speed, -1, 1) * 0.2, 0.2));
+    this.syncTurret();
+  }
+
+  /** 机头转到指定方向（贴图朝上，所以要多转 90°），尾焰也跟着挂到机尾 */
+  private faceTowards(angle: number, delta: number, snap = false): void {
+    const want = angle + Math.PI / 2;
+    this.setRotation(snap ? want : Phaser.Math.Angle.RotateTo(this.rotation, want, TURN_SPEED * (delta / 1000)));
+    // 朝上时机尾在正下方；跟着机身转，尾焰才不会从机头喷出来
+    this.exhaust.set(-Math.sin(this.rotation) * EXHAUST_BACK, Math.cos(this.rotation) * EXHAUST_BACK);
+    this.engine.followOffset.set(this.exhaust.x, this.exhaust.y);
+    // 粒子速度方向 = 机尾方向（Phaser 角度：0 度朝右，90 度朝下）
+    this.engine.angle = Phaser.Math.RadToDeg(this.rotation) + 90;
   }
 
   /** 自动射击：返回本次要发射的子弹参数，冷却中返回空数组 */
@@ -172,7 +223,21 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     if (this.rapid) delay /= 2;
     if (time - this.lastShot < delay) return [];
     this.lastShot = time;
-    return PATTERNS[this.weapon - 1].map((p) => ({ x: this.x + p.dx, y: this.y - 30, a: UP + p.a }));
+    // 沿机头方向打：整轮扇面跟着朝向转，每颗各偏一个角度，都从炮口出去
+    const a = this.aim;
+    const mx = this.x + Math.cos(a) * MUZZLE_FWD;
+    const my = this.y + Math.sin(a) * MUZZLE_FWD;
+    return FAN[this.weapon - 1].map((off) => ({ x: mx, y: my, a: a + off }));
+  }
+
+  /** 机头朝向，Phaser 的角度约定（0 = 右，-90° = 上）。子弹、僚机、导弹都按它算 */
+  get aim(): number {
+    return this.rotation - Math.PI / 2;
+  }
+
+  /** 机身贴图自身的旋转（0 = 贴图原始朝向，也就是朝上） */
+  get heading(): number {
+    return this.rotation;
   }
 
   updateBlink(time: number): void {

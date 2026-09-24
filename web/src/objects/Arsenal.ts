@@ -1,13 +1,16 @@
 import Phaser from 'phaser';
-import { COLORS, PLAYER } from '../config';
+import { COLORS, PLAYER, TURRET_FWD } from '../config';
 import type { GameScene } from '../scenes/GameScene';
 import { audio } from '../systems/audio';
 import { REGEN_INTERVAL_MS } from '../systems/skills';
 import { ENEMY_DEFS, type Enemy } from './Enemy';
 
-const UP = -Math.PI / 2;
 const ORB_RADIUS = 80;
 const BOSS_RADIUS = 85;
+/** 僚机的挂位与炮口都按机体比例缩，跟着 PLAYER.scale 一起变 */
+const S = PLAYER.scale;
+/** 导弹从机头前多远冒出来 */
+const MUZZLE_OFFSET = TURRET_FWD + 4 * S;
 
 /** 升级技能的运行时：追踪导弹、环绕光球、僚机、连锁闪电、护盾充能 */
 export class Arsenal {
@@ -19,6 +22,8 @@ export class Arsenal {
   private nextZap = 0;
   private nextWing = 0;
   private nextRegen = 0;
+  /** 场上还有几发追踪弹；为 0 时 steerMissiles 整段跳过 */
+  private homingLive = 0;
 
   constructor(private game: GameScene) {}
 
@@ -36,13 +41,18 @@ export class Arsenal {
     const s = p.skills;
     this.sync(this.orbs, s.orb ? s.orb + 1 : 0, 'orb', 7);
     this.sync(this.wingmen, Math.min(2, s.wingman), 'wingman', 5);
-    for (const o of [...this.orbs, ...this.wingmen]) o.setVisible(p.alive);
+    // 两段循环，避免每帧拼一个新数组
+    for (const o of this.orbs) o.setVisible(p.alive);
+    for (const w of this.wingmen) w.setVisible(p.alive);
     if (!p.alive) return;
 
     this.updateOrbs(time, delta);
     this.updateWingmen(time);
-    if (s.missile) this.updateMissiles(time);
-    this.steerMissiles(delta);
+    if (s.missile) {
+      this.updateMissiles(time);
+      // 没学导弹就不必每帧扫一遍全部子弹
+      this.steerMissiles(delta);
+    }
     if (s.lightning && time >= this.nextZap) this.zap(time);
 
     if (s.regen) {
@@ -68,25 +78,24 @@ export class Arsenal {
     const p = this.game.player;
     const dmg = 2 * p.damageMul;
     this.orbAngle += (delta / 1000) * 3.2;
-    const enemies = this.game.activeEnemies();
-    const eBullets = this.game.activeEnemyBullets();
     const boss = this.game.currentBoss;
 
     this.orbs.forEach((orb, i) => {
       const a = this.orbAngle + (i / this.orbs.length) * Math.PI * 2;
       orb.setPosition(p.x + Math.cos(a) * ORB_RADIUS, p.y + Math.sin(a) * ORB_RADIUS);
-      for (const e of enemies) {
-        if (e.active && time >= e.orbHitAt && near(orb, e, 16 + ENEMY_DEFS[e.kind].radius)) {
+      // 直接遍历组内数组，省掉每帧两次 getMatching 的分配
+      this.game.eachEnemy((e) => {
+        if (time >= e.orbHitAt && near(orb, e, 16 + ENEMY_DEFS[e.kind].radius)) {
           e.orbHitAt = time + 300;
           this.game.hitEnemy(e, dmg);
         }
-      }
-      for (const b of eBullets) {
-        if (b.active && near(orb, b, 18)) {
+      });
+      this.game.eachEnemyBullet((b) => {
+        if (near(orb, b, 18)) {
           this.game.explodeAt(b.x, b.y, COLORS.cyan, 0.15);
           b.kill();
         }
-      }
+      });
       if (boss && time >= this.orbBossHitAt && near(orb, boss, 16 + BOSS_RADIUS)) {
         this.orbBossHitAt = time + 250;
         this.game.hitBoss(dmg);
@@ -94,18 +103,24 @@ export class Arsenal {
     });
   }
 
-  // ───── 僚机：跟随在两翼，直线射击 ─────
+  // ───── 僚机：跟在两翼，朝机头方向射击 ─────
   private updateWingmen(time: number): void {
     if (!this.wingmen.length) return;
     const p = this.game.player;
+    const f = p.aim;
+    const c = Math.cos(f);
+    const s = Math.sin(f);
     this.wingmen.forEach((w, i) => {
       const side = i === 0 ? -1 : 1;
-      w.setPosition(Phaser.Math.Linear(w.x, p.x + side * 58, 0.2), Phaser.Math.Linear(w.y, p.y + 24, 0.2));
+      // 两翼 = 沿机头方向的垂线左右分开，再往机尾方向退一点
+      const tx = p.x - s * side * 58 * S - c * 24 * S;
+      const ty = p.y + c * side * 58 * S - s * 24 * S;
+      w.setPosition(Phaser.Math.Linear(w.x, tx, 0.2), Phaser.Math.Linear(w.y, ty, 0.2)).setRotation(p.heading);
     });
     if (time < this.nextWing) return;
-    this.nextWing = time + (p.skills.wingman >= 3 ? 180 : 360);
     // 僚机弹不反弹，飞出场外就消失
-    for (const w of this.wingmen) this.game.firePlayerBullet(w.x, w.y - 18, UP, 900, 'wbullet', 0.8 * p.damageMul, 0, { bounces: 0, lifeMs: 1400 });
+    this.nextWing = time + (p.skills.wingman >= 3 ? 180 : 360);
+    for (const w of this.wingmen) this.game.firePlayerBullet(w.x + c * 14 * S, w.y + s * 14 * S, f, 900, 'wbullet', 0.8 * p.damageMul, 0, { bounces: 0, lifeMs: 1000 });
   }
 
   // ───── 追踪导弹 ─────
@@ -113,21 +128,29 @@ export class Arsenal {
     if (time < this.nextMissile) return;
     const p = this.game.player;
     const lv = p.skills.missile;
+    const f = p.aim;
     this.nextMissile = time + 2400 - lv * 250;
     for (let i = 0; i < lv; i++) {
       const spread = (i - (lv - 1) / 2) * 0.45;
-      const b = this.game.firePlayerBullet(p.x, p.y, UP + spread, 380, 'missile', 3 * p.damageMul, 0, { bounces: 0, lifeMs: 5000 });
-      if (b) b.homing = true;
+      const b = this.game.firePlayerBullet(p.x + Math.cos(f) * MUZZLE_OFFSET, p.y + Math.sin(f) * MUZZLE_OFFSET, f + spread, 380, 'missile', 3 * p.damageMul, 0, { bounces: 0, lifeMs: 3200 });
+      if (b) {
+        b.homing = true;
+        this.homingLive++;
+      }
     }
     audio.missile();
   }
 
   private steerMissiles(delta: number): void {
+    // 没有在飞的追踪弹就直接跳过，别每帧去扫全部子弹和敌机
+    if (this.homingLive <= 0) return;
     const dt = delta / 1000;
     const enemies = this.game.activeEnemies();
     const boss = this.game.currentBoss;
-    for (const b of this.game.activePlayerBullets()) {
-      if (!b.homing) continue;
+    let alive = 0;
+    this.game.eachPlayerBullet((b) => {
+      if (!b.homing) return;
+      alive++;
       let target: { x: number; y: number } | undefined = boss;
       let best = boss ? Phaser.Math.Distance.Squared(b.x, b.y, boss.x, boss.y) : Infinity;
       for (const e of enemies) {
@@ -144,7 +167,9 @@ export class Arsenal {
         b.rotation = Phaser.Math.Angle.RotateTo(b.rotation, want, 5 * dt);
       }
       this.game.physics.velocityFromRotation(b.rotation, b.speed, (b.body as Phaser.Physics.Arcade.Body).velocity);
-    }
+    });
+    // 打光了就归零，下一帧开头那次早退就生效了
+    this.homingLive = alive;
   }
 
   // ───── 连锁闪电 ─────
@@ -153,7 +178,7 @@ export class Arsenal {
     const lv = p.skills.lightning;
     const dmg = (3 + lv) * p.damageMul;
     const candidates = this.game.activeEnemies().filter((e) => e.onScreen);
-    const chain: { x: number; y: number }[] = [{ x: p.x, y: p.y - 20 }];
+    const chain: { x: number; y: number }[] = [{ x: p.x + Math.cos(p.aim) * 20, y: p.y + Math.sin(p.aim) * 20 }];
     let from = chain[0];
     let range = 560;
     for (let n = 0; n < lv + 1; n++) {
