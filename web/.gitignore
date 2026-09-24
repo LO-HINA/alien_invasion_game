@@ -1,0 +1,7 @@
+node_modules/
+dist/
+shots/
+shot_*.png
+*.log
+preview.err
+__pycache__/
