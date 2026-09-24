@@ -127,21 +127,23 @@ export class Arsenal {
   private updateWingmen(time: number): void {
     if (!this.wingmen.length) return;
     const p = this.game.player;
-    // 摆位看机身（它们是挂在机身上的），开火看瞄准（机身还在转的时候也得打准）
+    // 挂位看机身（它们是挂在机身上的），朝向和开火都看瞄准 —— 和炮塔同一条规矩：
+    // 机身还在转的那十几帧里炮口早就对准了，僚机要是跟着机身转，
+    // 就会出现「侧着身子朝反方向开火」的样子
     const h = p.heading;
     const hc = Math.cos(h);
     const hs = Math.sin(h);
+    const f = p.aim;
+    const c = Math.cos(f);
+    const s = Math.sin(f);
     this.wingmen.forEach((w, i) => {
       const side = i === 0 ? -1 : 1;
       // 两翼 = 沿机身方向的垂线左右分开，再往机尾方向退一点
       const tx = p.x - hs * side * 58 * S - hc * 24 * S;
       const ty = p.y + hc * side * 58 * S - hs * 24 * S;
-      w.setPosition(Phaser.Math.Linear(w.x, tx, 0.2), Phaser.Math.Linear(w.y, ty, 0.2)).setRotation(h);
+      w.setPosition(Phaser.Math.Linear(w.x, tx, 0.2), Phaser.Math.Linear(w.y, ty, 0.2)).setRotation(f + Math.PI / 2);
     });
     if (time < this.nextWing) return;
-    const f = p.aim;
-    const c = Math.cos(f);
-    const s = Math.sin(f);
     // 僚机弹不反弹，飞出场外就消失
     this.nextWing = time + (p.skills.wingman >= 3 ? 180 : 360);
     for (const w of this.wingmen) this.game.firePlayerBullet(w.x + c * 14 * S, w.y + s * 14 * S, f, 900, 'wbullet', 0.8 * p.damageMul, 0, { bounces: 0, lifeMs: 1000 });
