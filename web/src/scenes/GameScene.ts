@@ -427,7 +427,9 @@ export class GameScene extends Phaser.Scene {
         break;
       }
       case 'v': {
-        const cx = Phaser.Math.Clamp(Phaser.Math.Between(0, span), 180, span - 180);
+        // 斜边张开 ±240，中心要留出这么多，否则两翼会落在入场边之外 ——
+        // 那几个成员永远飞不进战场，玩家一眼都看不到（Enemy 里另有兜底回收）
+        const cx = Phaser.Math.Clamp(Phaser.Math.Between(0, span), 240, span - 240);
         for (let i = 0; i < 11; i++) {
           const k = i - 5;
           this.spawn(side, 'drone', cx + k * 48, Math.abs(k) * 45);

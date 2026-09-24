@@ -35,6 +35,11 @@ export interface SpawnOpts {
   angle?: number;
 }
 
+/** 出场多远之后回收（飞进过战场的敌机） */
+const MARGIN = 160;
+/** 编队最多会退到入场边外这么远（最长的纵列是 14 架 × 55 像素 = 715），没进过战场的按它兜底 */
+const SPAWN_BACK = 800;
+
 /** 敌机从任意一条边飞进来，穿过战场后从另一侧飞走（不惩罚玩家） */
 export class Enemy extends Phaser.Physics.Arcade.Sprite {
   kind: EnemyKind = 'drone';
@@ -242,6 +247,12 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     }
 
     // 飞进过战场之后，从任意一边飞远就回收
-    if (this.entered && (this.x < -160 || this.x > GAME_W + 160 || this.y < -160 || this.y > GAME_H + 160)) this.disableBody(true, true);
+    const out = this.x < -MARGIN || this.x > GAME_W + MARGIN || this.y < -MARGIN || this.y > GAME_H + MARGIN;
+    // 没进过战场的另算：编队两翼要是落在入场边之外（V 字的斜边会超出屏幕宽度），
+    // 那几个成员顺着入场方向径直飞走，永远够不到世界矩形，entered 永远是 false ——
+    // 只看 entered 就会漏掉它们，它们会一直在场外飞，把池子占满，之后就刷不出新敌机了。
+    // 所以给它们一个更大的框：出了「编队最远的退距」就再也回不来了
+    const neverIn = this.x < -SPAWN_BACK || this.x > GAME_W + SPAWN_BACK || this.y < -SPAWN_BACK || this.y > GAME_H + SPAWN_BACK;
+    if (this.entered ? out : neverIn) this.disableBody(true, true);
   }
 }
