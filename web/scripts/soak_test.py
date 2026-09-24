@@ -40,17 +40,25 @@ TICK = """
         p.hp = p.maxHp;
         // 不起 Phaser 依赖：dragTarget 只需要是个带 set(x, y) 的点
         p.dragTarget = p.dragTarget || { x: p.x, y: p.y, set(x, y) { this.x = x; this.y = y; } };
-        if (s.boss) p.dragTarget.set(s.boss.x, Math.min(1120, s.boss.y + 420));
-        else p.dragTarget.set(360 + Math.sin(sec * 0.9) * 240, 640 + Math.sin(sec * 1.37) * 380);
+        if (s.boss) {
+            // 瞄准跟的是「拖动方向」，停在 Boss 下方不动 aim 就冻在最后一个方向上了，
+            // 等于一路打空气 —— 之前 180 秒推不出第 1 关就是这个原因。
+            // 所以贴着 Boss 上下往返：上行那一段机头正对着它（撞上不要紧，这里一路开着无敌），
+            // 下行那一段顺便把「朝着反方向拖」也压上
+            const b = s.boss;
+            const dive = Math.sin(sec * 1.6) > 0;
+            p.dragTarget.set(b.x, dive ? b.y + 30 : Math.min(1150, b.y + 480));
+        } else {
+            p.dragTarget.set(360 + Math.sin(sec * 0.9) * 240, 640 + Math.sin(sec * 1.37) * 380);
+        }
 
         // 界外敌机要分开看，否则量出来的全是噪声：
         //   · 编队会退到入场边外最多 715 像素再飞进来，这段时间它在界外完全正常
         //   · 真正的漏洞是「永远进不来还一直在场外赖着」的（编队两翼落在入场边之外的那种），
         //     它们会一直占着池位，攒够了就再也刷不出新敌机
-        // 所以分两种来判：进过场的出了 160 就该被回收（真 violation）；
-        // 没进过场的要是停住不动了，也会在兜底框里赖着不走（spawn 完第一帧还没走起来不算，
-        // 所以要求连着两次采样都在界外）。朝向不判 —— 横着擦过屏幕外时，
-        // 和「指向世界中心」的方向本来就近乎垂直，判了全是误报
+        // 所以分两种来判：进过场的出了 160 就该被回收；没进过场的要是停住不动了，
+        // 也会在兜底框里赖着不走。两种都要求连着两次采样都在界外（理由见下面 run 那几行）。
+        // 朝向不判 —— 横着擦过屏幕外时，和「指向世界中心」的方向本来就近乎垂直，判了全是误报
         let maxOut = 0;
         let stray = 0;
         let idle = 0;
@@ -72,7 +80,11 @@ TICK = """
             window.__soakRun.set(id, run);
             const v = e.body.velocity;
             const sp = Math.hypot(v.x, v.y);
-            const bad = e.entered || (run >= 2 && sp < 20);
+            // 要求连着两次采样都在界外。一是刚 spawn 的还没走起来（速度是 0）不算；
+            // 二是「越界检查跑在物理步进之前」—— 一帧结束后贴图会停在界外最多「一帧的位移」
+            // （190 速度就是 3 像素），下一帧才回收。采样正好落在这一帧里的话，
+            // 会看到一架刚过线一点点的敌机，那不是漏网，是量早了
+            const bad = run >= 2 && (e.entered || sp < 20);
             if (bad) {
                 if (e.entered) stray++; else idle++;
                 if (strayInfo.length < 3) strayInfo.push({ k: e.kind, en: e.entered, x: Math.round(e.x), y: Math.round(e.y), sp: Math.round(sp), d: Math.round(d) });
