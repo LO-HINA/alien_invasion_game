@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { BULLET, COLORS, COMBO_WINDOW_MS, FREEZE, GAME_H, GAME_W, HEAL_AMOUNT, hex, HIT, HURT_VIGNETTE_MS, LEECH, MAX_MULTIPLIER, PLAYER, REROLLS, XP_PICKUP, xpToNext } from '../config';
+import { BULLET, COLORS, COMBO_WINDOW_MS, FREEZE, GAME_H, GAME_W, GRAZE, HEAL_AMOUNT, hex, HIT, HURT_VIGNETTE_MS, LEECH, MAX_MULTIPLIER, PLAYER, REROLLS, XP_PICKUP, xpToNext } from '../config';
 import { Arsenal } from '../objects/Arsenal';
 import { Boss } from '../objects/Boss';
 import { Bullet, type BulletOpts } from '../objects/Bullet';
@@ -112,6 +112,10 @@ export class GameScene extends Phaser.Scene {
   rerolls = REROLLS;
   /** 上一波从哪条边来，用来做「换边」的压力节奏 */
   private lastSide: EntrySide = 'bottom';
+  /** 本局擦弹次数，结算时给玩家看一眼 */
+  private grazeCount = 0;
+  /** 擦弹的火花与音效上次是什么时候放的，用来限流 */
+  private grazeFxAt = 0;
 
   constructor() {
     super('Game');
@@ -152,6 +156,8 @@ export class GameScene extends Phaser.Scene {
     this.freezeUntil = 0;
     this.rerolls = REROLLS;
     this.lastSide = 'bottom';
+    this.grazeCount = 0;
+    this.grazeFxAt = 0;
     this.emitters = new Map();
     this.drag = undefined;
     this.pendingScore = 0;
@@ -317,6 +323,7 @@ export class GameScene extends Phaser.Scene {
         audio.shoot();
       }
       this.pullPowerUps();
+      this.checkGraze(time);
     }
 
     if (this.combo > 0 && time > this.comboUntil) this.combo = 0;
@@ -717,6 +724,42 @@ export class GameScene extends Phaser.Scene {
     this.pendingScore = 0;
   }
 
+  /**
+   * 擦弹：敌弹从机身旁边掠过就算一次，加分并把连击窗口续上。
+   * 判定点（机身中心那个亮点）只有 5 像素，光让玩家看见还不够 ——
+   * 「贴着弹幕飞」得真的有好处，玩家才会去用那份判定余量，而不是躲得远远的。
+   */
+  private checkGraze(now: number): void {
+    const p = this.player;
+    const r2 = GRAZE.radius * GRAZE.radius;
+    let hits = 0;
+    let lastX = 0;
+    let lastY = 0;
+    // 直接遍历组内数组，和别处一样不用 getMatching（那个会新建数组）
+    for (const o of this.eBullets.getChildren()) {
+      const b = o as Bullet;
+      if (!b.active || b.grazed) continue;
+      const dx = b.x - p.x;
+      const dy = b.y - p.y;
+      if (dx * dx + dy * dy > r2) continue;
+      b.grazed = true;
+      hits++;
+      lastX = b.x;
+      lastY = b.y;
+    }
+    if (hits === 0) return;
+    this.grazeCount += hits;
+    this.score += GRAZE.score * this.multiplier * hits;
+    // 续窗口但不涨连击：连击仍然只能靠击杀攒，擦弹管的是「别让它断」
+    this.comboUntil = now + COMBO_WINDOW_MS;
+    // 火花与音效封顶，判定点跳动跟着一起限流（一帧能擦到十几发，否则会响成一片）
+    if (now - this.grazeFxAt < GRAZE.fxMs) return;
+    this.grazeFxAt = now;
+    this.explode(lastX, lastY, COLORS.white, 0.2);
+    audio.graze();
+    p.graze(now);
+  }
+
   private gainXp(amount: number): void {
     this.xp += amount * this.player.xpMul;
     while (this.xp >= xpToNext(this.level)) {
@@ -810,6 +853,7 @@ export class GameScene extends Phaser.Scene {
     p.disableBody(true, true);
     // 机身一旦 inactive，Player.preUpdate 就不再跑，炮塔得手动收掉
     p.turret.setVisible(false);
+    p.core.setVisible(false);
     this.combo = 0;
 
     // 血条见底就结束，不再有复活
@@ -817,7 +861,7 @@ export class GameScene extends Phaser.Scene {
     this.time.delayedCall(1400, () => {
       this.physics.pause();
       this.scene.pause();
-      this.scene.launch('GameOver', { score: this.score, stage: this.stage, level: this.level });
+      this.scene.launch('GameOver', { score: this.score, stage: this.stage, level: this.level, graze: this.grazeCount });
     });
   }
 

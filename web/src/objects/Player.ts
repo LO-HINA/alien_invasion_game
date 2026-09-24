@@ -17,9 +17,12 @@ const VOLLEY: [number, number][] = [
 ];
 /** 每级各颗子弹相对机头的偏角，从最左到最右均匀铺开 */
 const FAN: number[][] = VOLLEY.map(([n, spread]) => Array.from({ length: n }, (_, i) => (i / (n - 1) - 0.5) * spread));
-// 机身转向的角速度（弧度/秒）。瞄准就是机头方向，所以转得要比纯装饰快一些才跟手
-const TURN_SPEED = 24;
-/** 低于这个速度就不改朝向，免得站定时被噪声抖得乱转 */
+// 机身转向的角速度（弧度/秒）。瞄准就是机头方向，所以这个值跟的是「打哪」而不是「看着顺眼」：
+// 24（约 1375°/s）那档是「机身慢慢绕轴转」的量级，直角要扫 5 帧，快速变向时机头会一直落在
+// 移动方向后面 —— 实测来回点方向时中位差 21°、最差 67°，子弹全打偏。现在 45 约两帧一个直角，
+// 180° 掉头也只要 4 帧，既跟得上手，单帧步进（60fps 约 43°）又还看得出是在转而不是瞬移
+const TURN_SPEED = 45;
+// 低于这个速度就不改朝向，免得站定时被噪声抖得乱转
 const TURN_MIN_SPEED = 30;
 /** 排气口在机尾多远 */
 const EXHAUST_BACK = 26 * PLAYER.scale;
@@ -27,6 +30,8 @@ const EXHAUST_BACK = 26 * PLAYER.scale;
 const MUZZLE_FWD = TURRET_FWD + 14 * PLAYER.scale;
 /** 判定点半径，比外形小得多，方便在弹幕里穿行 */
 const BODY_R = 5;
+/** 擦弹后判定点涨一圈的时长 */
+const CORE_PULSE_MS = 140;
 
 function emptySkills(): Record<SkillId, number> {
   return { gun: 0, rate: 0, power: 0, pierce: 0, bounce: 0, dash: 0, missile: 0, orb: 0, wingman: 0, lightning: 0, magnet: 0, regen: 0, hull: 0, leech: 0, xp: 0, repair: 0 };
@@ -58,8 +63,15 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   private nextGhost = 0;
   /** 炮塔：机身自由转向，炮口永远朝上，保证「自动向上射击」读得懂 */
   readonly turret: Phaser.GameObjects.Image;
+  /**
+   * 判定点：机身正中心那个亮点。跟着机身走，但不跟机身一起闪 ——
+   * 无敌时整个机身会忽明忽暗，判定点要是也跟着闪，最需要看清位置的时刻反而看不见了
+   */
+  readonly core: Phaser.GameObjects.Image;
   readonly engine: Phaser.GameObjects.Particles.ParticleEmitter;
   private readonly exhaust = new Phaser.Math.Vector2();
+  /** 擦弹时判定点涨一下，到这个时刻收回去 */
+  private corePulseUntil = 0;
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
     super(scene, x, y, 'player');
@@ -69,6 +81,7 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     (this.body as Phaser.Physics.Arcade.Body).setCircle(BODY_R, this.width / 2 - BODY_R, this.height / 2 - BODY_R);
 
     this.turret = scene.add.image(x, y - TURRET_FWD, 'turret').setDepth(6).setBlendMode(Phaser.BlendModes.ADD);
+    this.core = scene.add.image(x, y, 'core').setDepth(7).setBlendMode(Phaser.BlendModes.ADD);
     this.engine = scene.add.particles(0, 0, 'particle', {
       follow: this,
       followOffset: { x: 0, y: EXHAUST_BACK },
@@ -86,23 +99,35 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     this.engine.setDepth(4);
 
     // Arcade 是在 POST_UPDATE 才把 body 的坐标写回贴图的，所以要挂在这一步之后同步炮塔，
-    // 否则炮塔会用上一帧的机身位置，看起来永远差半个身位。
-    scene.events.on(Phaser.Scenes.Events.POST_UPDATE, this.syncTurret, this);
+    // 否则炮塔会用上一帧的机身位置，看起来永远差半个身位。判定点同理。
+    scene.events.on(Phaser.Scenes.Events.POST_UPDATE, this.syncAttachments, this);
     scene.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
-      scene.events.off(Phaser.Scenes.Events.POST_UPDATE, this.syncTurret, this);
+      scene.events.off(Phaser.Scenes.Events.POST_UPDATE, this.syncAttachments, this);
     });
   }
 
   /**
-   * 炮塔跟着机头转，子弹从它的炮口出去。
+   * 炮塔跟着机头转，子弹从它的炮口出去；判定点钉在机身中心。
    * 由 POST_UPDATE 驱动，保证和机身在同一帧、同一位置上。
    */
-  private syncTurret(): void {
+  private syncAttachments(): void {
     const a = this.aim;
     this.turret
       .setPosition(this.x + Math.cos(a) * TURRET_FWD, this.y + Math.sin(a) * TURRET_FWD)
       .setRotation(this.rotation)
       .setVisible(this.visible);
+    // 擦到弹时涨一圈，让「刚才那下很险」和判定点对上号
+    const pulse = Phaser.Math.Clamp((this.corePulseUntil - this.scene.time.now) / CORE_PULSE_MS, 0, 1);
+    this.core
+      .setPosition(this.x, this.y)
+      .setVisible(this.visible)
+      .setScale(1 + 0.55 * pulse)
+      .setAlpha(0.8 + 0.2 * pulse);
+  }
+
+  /** 擦弹一次：判定点跳一下 */
+  graze(now: number): void {
+    this.corePulseUntil = now + CORE_PULSE_MS;
   }
 
   get maxHp(): number {
@@ -171,7 +196,7 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
       this.faceTowards(Math.atan2(this.dirY, this.dirX), delta, true);
       this.engine.frequency = 3;
       this.ghost(now);
-      this.syncTurret();
+      this.syncAttachments();
       return;
     }
     this.engine.frequency = 14;
@@ -203,7 +228,7 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
       if (len > TURN_MIN_SPEED) this.faceTowards(Math.atan2(vy, vx), delta);
     }
     this.setVelocity(vx, vy);
-    this.syncTurret();
+    this.syncAttachments();
   }
 
   /** 机头转到指定方向（贴图朝上，所以要多转 90°），尾焰也跟着挂到机尾 */

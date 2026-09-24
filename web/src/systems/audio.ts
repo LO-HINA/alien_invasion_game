@@ -97,6 +97,8 @@ class AudioEngine {
   missile(): void { this.tone(260, 0.12, 'triangle', 0.05, 520); }
   /** 捡经验晶体：又轻又短，连着捡也不会吵 */
   pickup(): void { this.tone(1500, 0.05, 'triangle', 0.05, 2200); }
+  /** 擦弹：又高又细的一下，贴着弹幕飞时一秒响十几次也不烦 */
+  graze(): void { this.tone(2400, 0.03, 'sine', 0.035, 3400); }
   dash(): void {
     this.noise(0.22, 0.14, 3200);
     this.tone(880, 0.18, 'sawtooth', 0.06, 180);

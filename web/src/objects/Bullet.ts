@@ -19,6 +19,8 @@ export class Bullet extends Phaser.Physics.Arcade.Sprite {
   speed = 0;
   /** 玩家子弹会撞墙反弹；敌弹撞墙即消失 */
   friendly = true;
+  /** 这颗敌弹已经从机身旁边擦过去了（每颗只算一次，靠得太近时会连着好几帧都在圈里） */
+  grazed = false;
   private bounces = 0;
   private expireAt = 0;
   /** 穿透弹命中过的敌人，避免同一帧重复结算 */
@@ -38,6 +40,7 @@ export class Bullet extends Phaser.Physics.Arcade.Sprite {
     this.homing = false;
     this.speed = speed;
     this.friendly = !texture.startsWith('e');
+    this.grazed = false;
     this.hitSet.clear();
     const body = this.body as Phaser.Physics.Arcade.Body;
     const r = opts.radius ?? (this.friendly ? BULLET.radius : 5);

@@ -138,7 +138,84 @@ TELEGRAPH = """
 }
 """
 
-# 换边：stage 2 之后，多数波次该从上一波的对侧来
+# 擦弹：判定圈内算、圈外不算、同一颗只算一次、擦完连击窗口要续上、判定点跟着跳
+GRAZE = """
+() => {
+    const s = window.game.scene.getScene('Game');
+    const p = s.player;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    p.setPosition(360, 700);
+    s.combo = 5;                                // 倍率还是 1（10 次击杀才涨一级），分数好算
+    s.comboUntil = s.time.now + 100;
+    s.grazeCount = 0;
+    const before = { count: s.grazeCount, score: s.score };
+    // 速度 0：子弹悬在原地，好让「同一颗不会连着几帧重复计数」也一并测到
+    const shoot = (dx) => s.fireEnemy(p.x + dx, p.y, 0, 0, 'ebullet');
+    // 判定半径 26、碰撞半径约 10：20 在圈内（算擦弹），60 在圈外（不算）
+    shoot(20);
+    shoot(60);
+    return wait(40).then(() => {
+        // 判定点该在擦到的那一刻涨起来（跳动时长 140ms），跳完收回原大小
+        const pulse = +p.core.scaleX.toFixed(2);
+        const one = { count: s.grazeCount, score: s.score - before.score, comboUntil: Math.round(s.comboUntil - s.time.now) };
+        return wait(200).then(() => {
+            const settled = +p.core.scaleX.toFixed(2);
+            // 机身一旦收起来（阵亡走的就是这条路），判定点不能还留在场上
+            p.setVisible(false);
+            return wait(60).then(() => {
+                const hiddenWithShip = !p.core.visible;
+                p.setVisible(true);
+                return {
+                    one, again: { count: s.grazeCount, score: s.score - before.score },
+                    pulse, settled, hiddenWithShip,
+                    coreAtShip: Math.round(Math.hypot(p.core.x - p.x, p.core.y - p.y)),
+                };
+            });
+        });
+    });
+}
+"""
+
+# 转向：瞄准就是机头方向，所以机头必须跟得上移动方向。
+# 直线跑看不出问题（2 帧就跟平了），来回点方向时才露馅 —— 机头一直落在后面，子弹就打偏。
+# 判据是「机头与移动方向的夹角」：中位该是 0，最差不超过一帧的转角（60fps 下约 45~60°）。
+TURN_REC = """
+() => {
+    const s = window.game.scene.getScene('Game');
+    const p = s.player;
+    const sys = s.sys, orig = sys.step.bind(sys);
+    const samples = [];
+    window.__turn = samples;
+    window.__turnRec = true;
+    sys.step = (t, d) => {
+        orig(t, d);
+        if (!window.__turnRec) return;
+        const v = p.body.velocity;
+        samples.push({ r: p.rotation, sp: Math.hypot(v.x, v.y), va: Math.atan2(v.y, v.x) });
+    };
+    window.__turnStop = () => {
+        window.__turnRec = false;
+        sys.step = orig;
+        const norm = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+        const lag = [];
+        for (const sm of samples) {
+            if (sm.sp < 60) continue;              // 没在动的帧没有「移动方向」可比
+            // 机头方向 = rotation - 90°
+            lag.push(Math.abs(norm(sm.r - (norm(sm.va) + Math.PI / 2))) * 180 / Math.PI);
+        }
+        lag.sort((a, b) => a - b);
+        return {
+            moving: lag.length,
+            median: +(lag[Math.floor(lag.length / 2)] || 0).toFixed(1),
+            p95: +(lag[Math.floor(lag.length * 0.95)] || 0).toFixed(1),
+            max: +(lag[lag.length - 1] || 0).toFixed(1),
+        };
+    };
+    return true;
+}
+"""
+
+
 SIDES = """
 (n) => {
     const s = window.game.scene.getScene('Game');
@@ -274,6 +351,22 @@ with sync_playwright() as p:
     page.evaluate("() => { window.game.scene.getScene('Game').player.hp = 22; }")
     page.wait_for_timeout(400)
     page.screenshot(path=f"{SHOTS}/10_vignette.png")
+    page.evaluate(CLEAR)
+
+    page.evaluate(CLEAR)
+    print("擦弹:", page.evaluate(GRAZE))
+    page.screenshot(path=f"{SHOTS}/13_graze.png")
+    page.evaluate(CLEAR)
+
+    page.evaluate(CLEAR)
+    page.evaluate(TURN_REC)
+    # 来回点两个方向：每次都掉头 180°，机头最容易跟不上
+    for _ in range(6):
+        page.keyboard.down("d"); page.wait_for_timeout(80); page.keyboard.up("d")
+        page.keyboard.down("w"); page.wait_for_timeout(80); page.keyboard.up("w")
+    page.keyboard.up("d"); page.keyboard.up("w")
+    page.wait_for_timeout(60)
+    print("转向滞后(机头 vs 移动方向, 度):", page.evaluate("() => window.__turnStop()"))
     page.evaluate(CLEAR)
 
     print("Boss 前摇:", page.evaluate(TELEGRAPH, 14000))

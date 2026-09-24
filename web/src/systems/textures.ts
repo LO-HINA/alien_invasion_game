@@ -92,6 +92,14 @@ export function generateTextures(scene: Phaser.Scene): void {
     g.fillCircle(cx, cy + 2 * SHIP, 4.5 * SHIP);
   });
 
+  // 判定点：机身中心那个亮点。判定圈半径只有 5 像素、机身看起来却有 35 像素宽，
+  // 不画出来玩家只能靠感觉猜自己离弹幕还有多远，白白躲得过宽
+  make(scene, 'core', 22, 22, (g, cx, cy) => {
+    glow(g, COLORS.cyan, circlePath(8, cx, cy), 0.95);
+    g.fillStyle(COLORS.white, 1);
+    g.fillCircle(cx, cy, 2.6);
+  });
+
   shape(scene, 'drone', 48, 48, COLORS.magenta, [
     [[0, -14], [14, 0], [0, 14], [-14, 0]],
     [[0, -5], [5, 0], [0, 5], [-5, 0]],
