@@ -1,8 +1,10 @@
 """打击感与节奏的验证脚本（都是「手感」这类不好截图、只能量出来的东西）：
   顿帧（物理 / 补间被按住多久、有没有松开）、受击红晕与残血呼吸、
-  换边刷怪、每 5 波一次的喘息、升级重随、Boss 出招前摇
+  换边刷怪、每 5 波一次的喘息、升级重随、Boss 出招前摇，
+  以及转向 —— 瞄准误差该是 0、机身单帧步进该均匀（13.4° ≈ 角速度 14 rad/s × 一帧）
 用法： python scripts/feel_test.py [URL] [shots]
 """
+import math
 import os
 import sys
 from playwright.sync_api import sync_playwright
@@ -176,44 +178,49 @@ GRAZE = """
 }
 """
 
-# 转向：瞄准就是机头方向，所以机头必须跟得上移动方向。
-# 直线跑看不出问题（2 帧就跟平了），来回点方向时才露馅 —— 机头一直落在后面，子弹就打偏。
-# 判据是「机头与移动方向的夹角」：中位该是 0，最差不超过一帧的转角（60fps 下约 45~60°）。
+# 转向：这两件事现在是分开的，所以要分开量。
+#   · 瞄准（子弹打哪）——按下方向的那一帧就该到位，误差必须是 0
+#   · 机身转角（看得见的那部分）——平滑地追上去，每帧走一小步、方向单一、走到位就停
+# 键盘只有八个方向，如果机身也跟着瞬移，看起来就是「只有八个方向、指哪跳哪」；
+# 反过来把机身转速调慢又会把子弹一起拖住。所以这里量两个数：瞄准误差、机身单帧步进。
 TURN_REC = """
 () => {
     const s = window.game.scene.getScene('Game');
     const p = s.player;
     const sys = s.sys, orig = sys.step.bind(sys);
     const samples = [];
-    window.__turn = samples;
-    window.__turnRec = true;
+    let rec = true;
+    const set = (k, on) => { s.keys[k].isDown = on; };
+    const clear = () => ['W', 'A', 'S', 'D'].forEach((k) => set(k, false));
     sys.step = (t, d) => {
         orig(t, d);
-        if (!window.__turnRec) return;
-        const v = p.body.velocity;
-        samples.push({ r: p.rotation, sp: Math.hypot(v.x, v.y), va: Math.atan2(v.y, v.x) });
+        if (rec) samples.push({ r: p.rotation, a: p.aim, d, seg: s.__seg || 'start' });
     };
-    window.__turnStop = () => {
-        window.__turnRec = false;
-        sys.step = orig;
-        const norm = (a) => Math.atan2(Math.sin(a), Math.cos(a));
-        const lag = [];
-        for (const sm of samples) {
-            if (sm.sp < 60) continue;              // 没在动的帧没有「移动方向」可比
-            // 机头方向 = rotation - 90°
-            lag.push(Math.abs(norm(sm.r - (norm(sm.va) + Math.PI / 2))) * 180 / Math.PI);
+    // 一段按一个方向，每段都够长（机身该转完并停住）；最后一段是 180° 掉头
+    const plan = [['D', 700], ['W', 700], ['A', 700], ['D', 700], ['A', 800]];
+    let i = 0;
+    const next = () => {
+        if (i >= plan.length) {
+            rec = false;
+            sys.step = orig;
+            clear();
+            window.__turnSamples = samples;
+            return;
         }
-        lag.sort((a, b) => a - b);
-        return {
-            moving: lag.length,
-            median: +(lag[Math.floor(lag.length / 2)] || 0).toFixed(1),
-            p95: +(lag[Math.floor(lag.length * 0.95)] || 0).toFixed(1),
-            max: +(lag[lag.length - 1] || 0).toFixed(1),
-        };
+        const [k, ms] = plan[i++];
+        clear();
+        set(k, true);
+        s.__seg = k + i;
+        setTimeout(next, ms);
     };
+    clear();
+    s.__seg = 'start';
+    next();
     return true;
 }
 """
+# 每段按的方向 → 期望的瞄准角（Phaser：0 = 右，顺时针为正，所以上 = -90°）
+TURN_SEG = {"D1": 0, "W2": -90, "A3": 180, "D4": 0, "A5": 180}
 
 
 SIDES = """
@@ -302,6 +309,60 @@ ROLL = """
 }
 """
 
+def turn_report(samples):
+    """转向分两件事算：瞄准误差（子弹打哪，该是 0）和机身单帧步进（看得见的那部分）。"""
+    deg = lambda r: r * 180 / math.pi  # noqa: E731
+    norm = lambda a: math.atan2(math.sin(a), math.cos(a))  # noqa: E731
+    order, segs = [], {}
+    for sm in samples:
+        if sm["seg"] not in segs:
+            segs[sm["seg"]] = []
+            order.append(sm["seg"])
+        segs[sm["seg"]].append(sm)
+    rows = []
+    for seg in order:
+        want = TURN_SEG.get(seg)
+        if want is None:
+            continue
+        rows.append((seg, segs[seg], math.radians(want)))
+    out = {}
+    aim_max = 0.0
+    rate_max = 0.0
+    steps = []
+    worst = []
+    lag_peak = 0.0
+    settles = []
+    for seg, rs, want in rows:
+        aim = [abs(deg(norm(s["a"] - want))) for s in rs]
+        # 机身离目标还差多少（机身角 = 瞄准角 + 90°，贴图朝上）
+        lag = [abs(deg(norm(s["r"] - (want + math.pi / 2)))) for s in rs]
+        aim_max = max(aim_max, max(aim))
+        lag_peak = max(lag_peak, max(lag))
+        # 单帧步进：跳过每段头一帧（那一帧里含上一段的方向切换）。
+        # 按角速度看，不按角度看 —— 偶尔一帧卡顿（delta 大）会让角度很大，
+        # 那是掉帧不是「瞬移」，角速度才反映机身实际是怎么转的
+        for i in range(1, len(rs)):
+            step = abs(norm(rs[i]["r"] - rs[i - 1]["r"]))
+            if step > math.radians(0.2):
+                steps.append(deg(step))
+            rate = deg(step) / max(rs[i]["d"], 1) * 1000
+            rate_max = max(rate_max, rate)
+            worst.append((seg, round(deg(step), 1), rs[i]["d"]))
+        # 转到位要几帧（进入 2° 以内就不再动）
+        settle = next((i for i, v in enumerate(lag) if v < 2), None)
+        if settle is not None:
+            settles.append((seg, settle + 1))
+    steps.sort()
+    worst.sort(key=lambda w: -w[1] / max(w[2], 1))
+    return {
+        "瞄准误差max(度)": round(aim_max, 2),          # 按哪打哪，滞后必须是 0
+        "机身滞后峰值(度)": round(lag_peak),            # 换向那一瞬差多少
+        "机身转速 max(度/秒)": round(rate_max),
+        "单帧步进 中位(度)": round(steps[len(steps) // 2], 1) if steps else 0,
+        "转到位帧数": settles,                          # 每段花了多少帧追平
+        "最猛三帧(段, 步进, delta)": worst[:3],
+    }
+
 with sync_playwright() as p:
     browser = p.chromium.launch(args=["--use-gl=angle", "--autoplay-policy=no-user-gesture-required"])
     page = browser.new_page(viewport={"width": 720, "height": 1280})
@@ -360,13 +421,8 @@ with sync_playwright() as p:
 
     page.evaluate(CLEAR)
     page.evaluate(TURN_REC)
-    # 来回点两个方向：每次都掉头 180°，机头最容易跟不上
-    for _ in range(6):
-        page.keyboard.down("d"); page.wait_for_timeout(80); page.keyboard.up("d")
-        page.keyboard.down("w"); page.wait_for_timeout(80); page.keyboard.up("w")
-    page.keyboard.up("d"); page.keyboard.up("w")
-    page.wait_for_timeout(60)
-    print("转向滞后(机头 vs 移动方向, 度):", page.evaluate("() => window.__turnStop()"))
+    page.wait_for_timeout(4200)  # 五段，每段 0.7~0.8 秒
+    print("转向:", turn_report(page.evaluate("() => window.__turnSamples")))
     page.evaluate(CLEAR)
 
     print("Boss 前摇:", page.evaluate(TELEGRAPH, 14000))

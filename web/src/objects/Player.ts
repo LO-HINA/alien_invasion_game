@@ -17,13 +17,14 @@ const VOLLEY: [number, number][] = [
 ];
 /** 每级各颗子弹相对机头的偏角，从最左到最右均匀铺开 */
 const FAN: number[][] = VOLLEY.map(([n, spread]) => Array.from({ length: n }, (_, i) => (i / (n - 1) - 0.5) * spread));
-// 机身转向的角速度（弧度/秒）。瞄准就是机头方向，所以这个值跟的是「打哪」而不是「看着顺眼」：
-// 24（约 1375°/s）那档是「机身慢慢绕轴转」的量级，直角要扫 5 帧，快速变向时机头会一直落在
-// 移动方向后面 —— 实测来回点方向时中位差 21°、最差 67°，子弹全打偏。现在 45 约两帧一个直角，
-// 180° 掉头也只要 4 帧，既跟得上手，单帧步进（60fps 约 43°）又还看得出是在转而不是瞬移
-const TURN_SPEED = 45;
-// 低于这个速度就不改朝向，免得站定时被噪声抖得乱转
-const TURN_MIN_SPEED = 30;
+// 机身转速（弧度/秒）。这里只管「看得见的那部分」：机身平滑地转向瞄准方向。
+// 早先机身转速和瞄准是同一个值，怎么调都别扭 —— 快了跟手但看着像瞬移（键盘就八个方向，
+// 指哪跳哪），慢了看得见转可子弹跟着机头一起滞后。现在两件事分开：打哪在按下的那一帧
+// 就定死（见 aimAngle），机身用这个速度转过去，90° 约七帧、180° 掉头约十三帧，
+// 既看得见在转，又不至于拖到下一个操作才转完
+const HULL_TURN_SPEED = 14;
+/** 拖动时手指离机身多近就不改朝向了：一两像素的位移能算出几十度的方向抖动 */
+const DRAG_AIM_MIN = 12;
 /** 排气口在机尾多远 */
 const EXHAUST_BACK = 26 * PLAYER.scale;
 /** 炮口离机身中心多远（炮塔位置 + 炮管长度），子弹从这儿出去 */
@@ -60,6 +61,11 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   /** 最近一次的移动方向，冲刺沿它冲出去 */
   private dirX = 0;
   private dirY = -1;
+  /**
+   * 瞄准方向（Phaser 角度：0 = 右，-90° = 上）。子弹、僚机、导弹、闪电都按它算，
+   * 按下方向的那一帧就更新 —— 它和机身转角是两件事，机身只是转过去跟上它
+   */
+  private aimAngle = -Math.PI / 2;
   private nextGhost = 0;
   /** 炮塔：机身自由转向，炮口永远朝上，保证「自动向上射击」读得懂 */
   readonly turret: Phaser.GameObjects.Image;
@@ -114,7 +120,8 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     const a = this.aim;
     this.turret
       .setPosition(this.x + Math.cos(a) * TURRET_FWD, this.y + Math.sin(a) * TURRET_FWD)
-      .setRotation(this.rotation)
+      // 炮口指向「打哪」而不是「机身朝哪」：机身还在转的时候，炮塔已经对准了
+      .setRotation(a + Math.PI / 2)
       .setVisible(this.visible);
     // 擦到弹时涨一圈，让「刚才那下很险」和判定点对上号
     const pulse = Phaser.Math.Clamp((this.corePulseUntil - this.scene.time.now) / CORE_PULSE_MS, 0, 1);
@@ -193,7 +200,7 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     const now = this.scene.time.now;
     if (now < this.dashUntil) {
       this.setVelocity(this.dirX * DASH.speed, this.dirY * DASH.speed);
-      this.faceTowards(Math.atan2(this.dirY, this.dirX), delta, true);
+      this.snapAim(Math.atan2(this.dirY, this.dirX));
       this.engine.frequency = 3;
       this.ghost(now);
       this.syncAttachments();
@@ -206,9 +213,12 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     let vx: number;
     let vy: number;
     if (kx || ky || !this.dragTarget) {
-      const v = new Phaser.Math.Vector2(kx, ky).normalize().scale(PLAYER.speed);
-      vx = v.x;
-      vy = v.y;
+      // 直接算单位向量，别为了归一化每帧 new 一个 Vector2
+      const len = Math.hypot(kx, ky) || 1;
+      vx = (kx / len) * PLAYER.speed;
+      vy = (ky / len) * PLAYER.speed;
+      // 按哪打哪：方向键只有八个方向，但瞄准就是这八个之一，按下就生效
+      if (kx || ky) this.aimAngle = Math.atan2(ky, kx);
     } else {
       // 拖动：朝目标点移动，距离近时减速，避免抖动
       const t = this.dragTarget;
@@ -219,23 +229,42 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
       const sp = Math.min(PLAYER.speed * 1.8, dist * 12);
       vx = dist > 1 ? (dx / dist) * sp : 0;
       vy = dist > 1 ? (dy / dist) * sp : 0;
+      // 拖动是指哪打哪，而且方向是连续的 —— 手指挪一点，机头就跟着转一点，
+      // 比八个方向细得多。只有贴到机身上时方向会抖（一两像素就是几十度），留个死区
+      if (dist > DRAG_AIM_MIN) this.aimAngle = Math.atan2(dy, dx);
     }
     if (vx || vy) {
       const len = Math.hypot(vx, vy);
       this.dirX = vx / len;
       this.dirY = vy / len;
-      // 够快才改朝向，站定时保持机头方向不乱晃
-      if (len > TURN_MIN_SPEED) this.faceTowards(Math.atan2(vy, vx), delta);
     }
+    this.turnHull(delta);
     this.setVelocity(vx, vy);
     this.syncAttachments();
   }
 
-  /** 机头转到指定方向（贴图朝上，所以要多转 90°），尾焰也跟着挂到机尾 */
-  private faceTowards(angle: number, delta: number, snap = false): void {
-    const want = angle + Math.PI / 2;
-    this.setRotation(snap ? want : Phaser.Math.Angle.RotateTo(this.rotation, want, TURN_SPEED * (delta / 1000)));
-    // 朝上时机尾在正下方；跟着机身转，尾焰才不会从机头喷出来
+  /** 机身平滑地转向瞄准方向 —— 看得见在转，但「打哪」不等它 */
+  private turnHull(delta: number): void {
+    // 用「最短路的差值」自己走一步，不用 Angle.RotateTo：机身角会一直累加
+    // （转几圈之后停在 -178°，而目标角是 90°+瞄准 = 270°），RotateTo 拿两个原始角
+    // 一比，差 448° 就落进它「差不到一整圈 = 干脆甩过去」那一档，机身会突然跳 88°。
+    // 先 wrap 到 ±180° 再比，差值永远是真正要转的那点角度，一帧最多走一步
+    const want = Phaser.Math.Angle.Wrap(this.aimAngle + Math.PI / 2);
+    const step = HULL_TURN_SPEED * (delta / 1000);
+    const diff = Phaser.Math.Angle.Wrap(want - this.rotation);
+    this.setRotation(this.rotation + Phaser.Math.Clamp(diff, -step, step));
+    this.updateExhaust();
+  }
+
+  /** 一下甩到指定方向（冲刺专用：不插值，整个人连着机头一起冲） */
+  private snapAim(angle: number): void {
+    this.aimAngle = angle;
+    this.setRotation(angle + Math.PI / 2);
+    this.updateExhaust();
+  }
+
+  /** 尾焰挂在机尾、朝机尾方向喷；跟着机身转，才不会从机头喷出来 */
+  private updateExhaust(): void {
     this.exhaust.set(-Math.sin(this.rotation) * EXHAUST_BACK, Math.cos(this.rotation) * EXHAUST_BACK);
     this.engine.followOffset.set(this.exhaust.x, this.exhaust.y);
     // 粒子速度方向 = 机尾方向（Phaser 角度：0 度朝右，90 度朝下）
@@ -255,12 +284,12 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
     return FAN[this.weapon - 1].map((off) => ({ x: mx, y: my, a: a + off }));
   }
 
-  /** 机头朝向，Phaser 的角度约定（0 = 右，-90° = 上）。子弹、僚机、导弹都按它算 */
+  /** 瞄准方向，Phaser 的角度约定（0 = 右，-90° = 上）。子弹、僚机、导弹都按它算 */
   get aim(): number {
-    return this.rotation - Math.PI / 2;
+    return this.aimAngle;
   }
 
-  /** 机身贴图自身的旋转（0 = 贴图原始朝向，也就是朝上） */
+  /** 机身贴图自身的旋转（0 = 贴图原始朝向，也就是朝上）。只管看起来朝哪，不代表打哪 */
   get heading(): number {
     return this.rotation;
   }

@@ -16,6 +16,8 @@ const MUZZLE_OFFSET = TURRET_FWD + 4 * S;
 export class Arsenal {
   private orbs: Phaser.GameObjects.Image[] = [];
   private wingmen: Phaser.GameObjects.Image[] = [];
+  /** 追踪弹的候选目标，每帧复用同一个数组（见 steerMissiles） */
+  private readonly targets: Enemy[] = [];
   private orbAngle = 0;
   private orbBossHitAt = 0;
   private nextMissile = 0;
@@ -74,50 +76,72 @@ export class Arsenal {
 
   // ───── 环绕光球：撞伤敌人、抵消敌弹 ─────
   private updateOrbs(time: number, delta: number): void {
-    if (!this.orbs.length) return;
+    const n = this.orbs.length;
+    if (!n) return;
     const p = this.game.player;
     const dmg = 2 * p.damageMul;
     this.orbAngle += (delta / 1000) * 3.2;
     const boss = this.game.currentBoss;
 
     this.orbs.forEach((orb, i) => {
-      const a = this.orbAngle + (i / this.orbs.length) * Math.PI * 2;
+      const a = this.orbAngle + (i / n) * Math.PI * 2;
       orb.setPosition(p.x + Math.cos(a) * ORB_RADIUS, p.y + Math.sin(a) * ORB_RADIUS);
-      // 直接遍历组内数组，省掉每帧两次 getMatching 的分配
-      this.game.eachEnemy((e) => {
-        if (time >= e.orbHitAt && near(orb, e, 16 + ENEMY_DEFS[e.kind].radius)) {
+    });
+
+    // 反着扫：外层是场上的敌人 / 敌弹，内层才是最多四个光球。
+    // 原来是每个光球各扫一遍全池（满技能四个球 = 四遍敌机 + 四遍敌弹），
+    // 而池子是按峰值开的、绝大多数格子空着 —— 这么换一下，池只扫一遍，内层最多四次
+    this.game.eachEnemy((e) => {
+      if (time < e.orbHitAt) return;
+      const r = 16 + ENEMY_DEFS[e.kind].radius;
+      for (const orb of this.orbs) {
+        if (near(orb, e, r)) {
+          // 一帧只吃一下，和原来「先碰上的那个球打中、顺手记冷却」是同一个效果
           e.orbHitAt = time + 300;
           this.game.hitEnemy(e, dmg);
+          return;
         }
-      });
-      this.game.eachEnemyBullet((b) => {
+      }
+    });
+    this.game.eachEnemyBullet((b) => {
+      for (const orb of this.orbs) {
         if (near(orb, b, 18)) {
           this.game.explodeAt(b.x, b.y, COLORS.cyan, 0.15);
           b.kill();
+          return;
         }
-      });
-      if (boss && time >= this.orbBossHitAt && near(orb, boss, 16 + BOSS_RADIUS)) {
-        this.orbBossHitAt = time + 250;
-        this.game.hitBoss(dmg);
       }
     });
+    if (boss && time >= this.orbBossHitAt) {
+      for (const orb of this.orbs) {
+        if (near(orb, boss, 16 + BOSS_RADIUS)) {
+          this.orbBossHitAt = time + 250;
+          this.game.hitBoss(dmg);
+          return;
+        }
+      }
+    }
   }
 
-  // ───── 僚机：跟在两翼，朝机头方向射击 ─────
+  // ───── 僚机：挂在两翼，跟着机身摆位，但和主炮打同一个方向 ─────
   private updateWingmen(time: number): void {
     if (!this.wingmen.length) return;
     const p = this.game.player;
+    // 摆位看机身（它们是挂在机身上的），开火看瞄准（机身还在转的时候也得打准）
+    const h = p.heading;
+    const hc = Math.cos(h);
+    const hs = Math.sin(h);
+    this.wingmen.forEach((w, i) => {
+      const side = i === 0 ? -1 : 1;
+      // 两翼 = 沿机身方向的垂线左右分开，再往机尾方向退一点
+      const tx = p.x - hs * side * 58 * S - hc * 24 * S;
+      const ty = p.y + hc * side * 58 * S - hs * 24 * S;
+      w.setPosition(Phaser.Math.Linear(w.x, tx, 0.2), Phaser.Math.Linear(w.y, ty, 0.2)).setRotation(h);
+    });
+    if (time < this.nextWing) return;
     const f = p.aim;
     const c = Math.cos(f);
     const s = Math.sin(f);
-    this.wingmen.forEach((w, i) => {
-      const side = i === 0 ? -1 : 1;
-      // 两翼 = 沿机头方向的垂线左右分开，再往机尾方向退一点
-      const tx = p.x - s * side * 58 * S - c * 24 * S;
-      const ty = p.y + c * side * 58 * S - s * 24 * S;
-      w.setPosition(Phaser.Math.Linear(w.x, tx, 0.2), Phaser.Math.Linear(w.y, ty, 0.2)).setRotation(p.heading);
-    });
-    if (time < this.nextWing) return;
     // 僚机弹不反弹，飞出场外就消失
     this.nextWing = time + (p.skills.wingman >= 3 ? 180 : 360);
     for (const w of this.wingmen) this.game.firePlayerBullet(w.x + c * 14 * S, w.y + s * 14 * S, f, 900, 'wbullet', 0.8 * p.damageMul, 0, { bounces: 0, lifeMs: 1000 });
@@ -145,7 +169,11 @@ export class Arsenal {
     // 没有在飞的追踪弹就直接跳过，别每帧去扫全部子弹和敌机
     if (this.homingLive <= 0) return;
     const dt = delta / 1000;
-    const enemies = this.game.activeEnemies();
+    // 候选目标复用同一个数组：这段每帧都要跑，length 归零再填不会真的分配
+    this.targets.length = 0;
+    this.game.eachEnemy((e) => {
+      if (e.onScreen) this.targets.push(e);
+    });
     const boss = this.game.currentBoss;
     let alive = 0;
     this.game.eachPlayerBullet((b) => {
@@ -153,8 +181,7 @@ export class Arsenal {
       alive++;
       let target: { x: number; y: number } | undefined = boss;
       let best = boss ? Phaser.Math.Distance.Squared(b.x, b.y, boss.x, boss.y) : Infinity;
-      for (const e of enemies) {
-        if (!e.onScreen) continue;
+      for (const e of this.targets) {
         const d = Phaser.Math.Distance.Squared(b.x, b.y, e.x, e.y);
         if (d < best) {
           best = d;
