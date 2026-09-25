@@ -5,3 +5,7 @@ shot_*.png
 *.log
 preview.err
 __pycache__/
+
+# IDE 与虚拟环境
+.idea/
+.venv/
