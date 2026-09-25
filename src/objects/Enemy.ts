@@ -1,8 +1,9 @@
 import Phaser from 'phaser';
-import { COLORS, DIFF, GAME_H, GAME_W } from '../config';
+import { COLORS, DIFF, ELITE, GAME_H, GAME_W, LASER, STEP } from '../config';
 import type { GameScene } from '../scenes/GameScene';
+import type { BulletOpts } from './Bullet';
 
-export type EnemyKind = 'drone' | 'wave' | 'shooter' | 'charger' | 'tank' | 'sniper' | 'spinner' | 'splitter' | 'bomber' | 'rammer';
+export type EnemyKind = 'drone' | 'wave' | 'shooter' | 'charger' | 'tank' | 'sniper' | 'spinner' | 'splitter' | 'bomber' | 'rammer' | 'elite' | 'laser';
 
 interface EnemyDef {
   hp: number;
@@ -32,7 +33,22 @@ export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
   // 它和冲锋机一样是「逼你动」的机型，3 血的话一边后撤一边顺手就点掉了，
   // 那它追人的意义就没了。6 血（后期 12）刚好让「是先清它还是先躲弹」变成一道选择题
   rammer: { hp: 6, speed: 155, score: 300, xp: 2, color: COLORS.yellow, radius: 14, dropChance: 0.1 },
+  // 精英机：第 5 关起、且每关过了前 5 波才开始出现（见 GameScene 的 SPECIAL_FROM_STAGE）。
+  // 血不封顶（见 config 的 ELITE），打的是红色的弹 —— 那种弹无视护盾、
+  // 也穿得过环绕光球，只能靠躲。判定圈跟着贴图一起收（24 → 19 → 16）：
+  // 它一场能同时站好几架、一挂十几秒，块头大只是挤掉杂兵的存在感，不是难度
+  elite: { hp: 26, speed: 110, score: 2500, xp: 16, color: COLORS.red, radius: 16, dropChance: 0.85 },
+  // 激光机：全场最少的机型。不开弹，只按一条固定方向拉激光，起手有预警线。
+  // 它存在的意义是封走位，不是打伤害，所以血给得不多 —— 能打掉就该打掉。
+  // 门槛和精英机一样（第 5 关起）：第一关就横一道光束过来，玩家连躲的概念都还没有
+  laser: { hp: 14, speed: 90, score: 1800, xp: 12, color: COLORS.orange, radius: 15, dropChance: 0.6 },
 };
+
+/**
+ * 精英机的弹：红色，**挡不住**（无视护盾和环绕光球）。
+ * 提成常量而不是每发写一个对象字面量 —— 一次扇形就是好几发，没必要每发 new 一个
+ */
+const ELITE_SHOT: BulletOpts = { tier: 'elite', unblockable: true };
 
 export interface SpawnOpts {
   amp?: number;
@@ -40,6 +56,11 @@ export interface SpawnOpts {
   phase?: number;
   /** 前进方向（弧度），默认向下；四边入场时由 GameScene 给出 */
   angle?: number;
+  /**
+   * 第 10 关之后的阶跃档数（见 config 的 STEP.tier）。只有精英机吃这一项 ——
+   * 它是阶跃唯一的着力点，别的机型该封顶的都封着
+   */
+  tier?: number;
 }
 
 /** 出场多远之后回收（飞进过战场的敌机） */
@@ -65,11 +86,24 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
   orbHitAt = 0;
   /** 冲刺对同一敌人的伤害冷却 */
   dashHitAt = 0;
+  /** 激光对同一敌人的伤害冷却 */
+  laserHitAt = 0;
+  /**
+   * 激光方向。**在锁定那一刻定死**，之后不再跟随玩家 —— 跟着转的话
+   * 就成了一根永远甩不掉的鞭子，而不是「把你现在站的地方封掉」
+   */
+  laserAngle = 0;
+  /** 预警线结束、开始灼烧的时刻；0 = 这一轮还没起手 */
+  laserWarnUntil = 0;
+  /** 灼烧结束的时刻。GameScene 每帧靠这两个时间戳决定画线还是画光束 */
+  laserFireUntil = 0;
   private t = 0;
   private mode = 0;
   private stateAt = 0;
   private nextFire = 0;
   private diff = 1;
+  /** 第 10 关之后的阶跃档数，只有精英机的血和弹数吃它 */
+  private tier = 0;
   private amp = 0;
   private freq = 0;
   private phase = 0;
@@ -99,15 +133,26 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
     this.setAlpha(1).setScale(1);
     const def = this.def;
     this.diff = diff;
+    this.tier = opts.tier ?? 0;
     // 取整往**下**取，不是往上：1 血的杂兵乘上任何大于 1 的倍率，ceil 都会把它顶成 2，
     // 第 3 关（倍率 1.15）就「两发才死」了 —— 那正是「点对技能就该一直秒杀」要避免的。
     // floor 让 1 血杂兵一直保持 1 血（到第 11 关倍率摸到 2 才变厚），
-    // 硬骨头（重装机那些）按同样的倍率照常涨，24 → 48
-    this.hp = Math.floor(def.hp * Math.min(DIFF.hpMax, 1 + (diff - 1) * DIFF.hp));
+    // 硬骨头（重装机那些）按同样的倍率照常涨，24 → 48。
+    //
+    // 精英机不走这条：DIFF.hpMax 那个 2 倍的上限是给杂兵定的（堆厚了手感从「爽」变「磨」），
+    // 而精英机要的恰恰是「一直变强」—— 玩家的伤害是乘起来的，它的血也得跟着乘上去，
+    // 否则第 10 关之后它就只是个血多一点的小兵。
+    // 第 10 关之后还要再叠一道阶跃（STEP.hpPerStage），两条都是乘的，不封顶
+    this.hp = kind === 'elite'
+      ? Math.floor(def.hp * (1 + (diff - 1) * ELITE.hpPerStage) * (1 + this.tier * STEP.hpPerStage))
+      : Math.floor(def.hp * Math.min(DIFF.hpMax, 1 + (diff - 1) * DIFF.hp));
     this.t = 0;
     this.mode = 0;
     this.orbHitAt = 0;
     this.dashHitAt = 0;
+    this.laserHitAt = 0;
+    this.laserWarnUntil = 0;
+    this.laserFireUntil = 0;
     this.amp = opts.amp ?? 120;
     this.freq = opts.freq ?? 2.2;
     this.phase = opts.phase ?? 0;
@@ -292,8 +337,46 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
         }
         break;
       }
+      case 'elite': {
+        // 和射击机一样深入战场后悬停，但停得更靠前、更硬、打得更狠。
+        // 弹数随难度涨，「属性不断提升」不只是血 —— 阶跃那一段再叠一道
+        const leaving = this.t > 14;
+        const station = Math.min(GAME_W, GAME_H) * 0.32;
+        const fwd = leaving ? sp * 2 : inward < station ? sp * 1.4 : 14;
+        const lat = Math.sin(this.t * 1.2 + this.phase) * 84;
+        this.setVelocity(ca * fwd + px * lat, sa * fwd + py * lat);
+        this.rotation += dt * 0.8;
+        if (!leaving && onScreen && time >= this.nextFire) {
+          this.nextFire = time + ELITE.fireMs / (1 + this.diff * ELITE.firePerStage);
+          const shots = ELITE.shots + Math.min(3, Math.floor(this.diff / 3)) + Math.min(3, this.tier);
+          game.fireEnemyAimed(this.x, this.y, ELITE.speed, 'ebullet4', shots, ELITE.spread, ELITE_SHOT);
+        }
+        break;
+      }
+      case 'laser': {
+        // 进来找个位置停住，然后一轮一轮地拉激光。停得比谁都靠后：
+        // 它要活着才有威胁，冲太前等于送分
+        const leaving = this.t > 15;
+        const station = Math.min(GAME_W, GAME_H) * 0.34;
+        const fwd = leaving ? sp * 2 : inward < station ? sp * 1.4 : 0;
+        this.setVelocity(ca * fwd, sa * fwd);
+        this.rotation += dt * 0.5;
+        if (leaving || !onScreen) {
+          // 走的时候把这一轮取消掉，否则光束会挂在屏幕外继续烧
+          this.laserWarnUntil = 0;
+          this.laserFireUntil = 0;
+          break;
+        }
+        // 起手：朝玩家**现在**的位置锁一个方向，然后就不再改了
+        if (time >= this.nextFire && time >= this.laserFireUntil) {
+          this.laserAngle = Phaser.Math.Angle.Between(this.x, this.y, game.player.x, game.player.y);
+          this.laserWarnUntil = time + LASER.warnMs;
+          this.laserFireUntil = this.laserWarnUntil + LASER.fireMs;
+          this.nextFire = this.laserFireUntil + LASER.restMs;
+        }
+        break;
+      }
     }
-
     // 飞进过战场之后，从任意一边飞远就回收
     const out = this.x < -MARGIN || this.x > GAME_W + MARGIN || this.y < -MARGIN || this.y > GAME_H + MARGIN;
     // 没进过战场的另算：编队两翼要是落在入场边之外（V 字的斜边会超出屏幕宽度），

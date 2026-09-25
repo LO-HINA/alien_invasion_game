@@ -13,6 +13,8 @@ export interface HudState {
   level: number;
   xp: number;
   xpNeed: number;
+  /** 已经满级：经验条改显示 MAX，也不再按比例算宽度（满级时 xpNeed 没意义） */
+  maxed: boolean;
   player: Player;
   boss?: Boss;
 }
@@ -142,18 +144,20 @@ export class Hud {
       this.levelText.setScale(1.6);
       this.scene.tweens.add({ targets: this.levelText, scale: 1, duration: 400, ease: 'Back.out' });
     }
-    this.levelText.setText(`LV ${s.level}`);
-    this.xpText.setText(`EXP ${Math.floor(s.xp)} / ${s.xpNeed}`);
+    this.levelText.setText(s.maxed ? `LV ${s.level} MAX` : `LV ${s.level}`);
+    this.xpText.setText(s.maxed ? 'EXP MAX' : `EXP ${Math.floor(s.xp)} / ${s.xpNeed}`);
 
     const g = this.g;
     g.clear();
 
-    // 底部经验条
+    // 底部经验条。满级之后整条填满：它现在的意思是「这条线走完了」，
+    // 而不是「进度」。不清空也不填满的话，满级在屏幕上根本看不出来
     const xw = GAME_W - PAD * 2;
+    const xr = s.maxed ? 1 : Phaser.Math.Clamp(s.xp / s.xpNeed, 0, 1);
     g.fillStyle(COLORS.blue, 0.15);
     g.fillRect(PAD, this.xpY, xw, 10);
     g.fillStyle(COLORS.blue, 0.9);
-    g.fillRect(PAD, this.xpY, xw * Math.min(1, s.xp / s.xpNeed), 10);
+    g.fillRect(PAD, this.xpY, xw * xr, 10);
     g.lineStyle(1, COLORS.cyan, 0.8);
     g.strokeRect(PAD, this.xpY, xw, 10);
 

@@ -1,10 +1,10 @@
 import Phaser from 'phaser';
-import { BULLET, COLORS, COMBO_WINDOW_MS, FREEZE, GAME_H, GAME_W, GRAZE, HEAL_AMOUNT, hex, hitDamage, HIT, HURT_VIGNETTE_MS, LEECH, MAX_MULTIPLIER, PLAYER, REROLLS, stageDiff, stagePack, XP_PICKUP, xpToNext } from '../config';
+import { BULLET, BULLET_HIT, COLORS, COMBO_WINDOW_MS, eliteCap, elitePerWave, FREEZE, GAME_H, GAME_W, GRAZE, HEAL_AMOUNT, hex, hitDamage, HIT, HURT_VIGNETTE_MS, LASER, LEECH, MAX_MULTIPLIER, PLAYER, REROLLS, stageDiff, stagePack, stageTier, STEP, XP_PICKUP, xpToNext } from '../config';
 import { Arsenal } from '../objects/Arsenal';
 import { Boss } from '../objects/Boss';
 import { Bullet, type BulletOpts } from '../objects/Bullet';
 import { ENEMY_DEFS, Enemy, type EnemyKind, type SpawnOpts } from '../objects/Enemy';
-import { Player } from '../objects/Player';
+import { BODY_R, Player } from '../objects/Player';
 import { POWER_INFO, PowerUp, randomPowerKind, type PowerKind } from '../objects/PowerUp';
 import { audio } from '../systems/audio';
 import { applySkill, MAGNET_RANGE, rollSkills, type SkillId } from '../systems/skills';
@@ -44,10 +44,31 @@ const BULK_PATTERNS: [WavePattern, number][] = [
 ];
 
 /** 「会开火的」机型。判断场上还有没有弹幕威胁时看这几个在不在 */
-const GUN_KINDS = new Set<EnemyKind>(['shooter', 'tank', 'sniper', 'spinner', 'bomber']);
+const GUN_KINDS = new Set<EnemyKind>(['shooter', 'tank', 'sniper', 'spinner', 'bomber', 'elite']);
 
 /** 场上一发弹都没有、而且快空了的时候，把下一波提前拉到这么多毫秒以内 */
 const EMPTY_PULL_MS = 900;
+
+/**
+ * 精英机和激光机从什么时候开始出现：**第 5 关起**，而且那一关也要先过掉前 5 波。
+ *
+ * 两个条件管的不是一回事：stage 管「这一整局里什么时候才开始有这种东西」，
+ * wave 管「每关开头那几波先别上」。为什么两个都要：
+ *   · 它们不是杂兵。第一关的玩家手里只有一级主炮，一上来就被红色弹幕追着打，
+ *     那不叫难度，叫不讲理 —— 这两种是「打到后面才配撞上」的机型
+ *   · 每关的前 5 波是留给玩家把武器和技能拉起来的，所以就算到了第 5 关，
+ *     一关的开头也不该直接撞上它们
+ * waveCount 每关开场归零，所以第二个条件是**每一关**都生效的 —— 只写 wave 的话
+ * 每一关的第六波都会来一架，第一关也不例外（之前就是这么漏的）
+ */
+const SPECIAL_FROM_STAGE = 5;
+const SPECIAL_FROM_WAVE = 5;
+/**
+ * 激光机的出场概率与同时上限 —— 全场最少的机型，多了一屏幕都是线，反而没地方站
+ */
+const LASER_CHANCE = 0.16;
+/** 激光机同时最多几台：第 10 关起放宽到两台，一道光束封不住的时候加第二道 */
+const LASER_MAX = (stage: number) => (stage >= 10 ? 2 : 1);
 
 // 四边出现概率，正面仍然是主要压力来源
 const SIDE_WEIGHT: [EntrySide, number][] = [
@@ -125,6 +146,14 @@ export class GameScene extends Phaser.Scene {
   private layoutH = 0;
   /** 屏幕暗角：挨打与残血共用一层，画在战场之上、HUD 之下 */
   private vignette!: Phaser.GameObjects.Graphics;
+  /**
+   * 激光。**全场共用这一个 Graphics**，每帧清掉重画：敌机是从池子里反复取用的，
+   * 每架自带一个 Graphics 的话，回收时不清干净就会把上一轮的光束留在屏幕上。
+   * 一层画完所有激光，也就不必去管谁进谁出了
+   */
+  private laserGfx!: Phaser.GameObjects.Graphics;
+  /** 激光下一次结算灼烧的时刻。全场一个 —— 同时站在两道光束里也只算一下 */
+  private nextLaserTick = 0;
   private hurtAt = -9999;
   /** 顿帧结束的时刻，0 表示没在顿 */
   private freezeUntil = 0;
@@ -223,7 +252,9 @@ export class GameScene extends Phaser.Scene {
       const bullet = b as unknown as Bullet;
       if (!bullet.active || !this.player.alive || this.player.invulnerable) return;
       bullet.kill();
-      this.hurtPlayer(this.takenDamage(bullet.heavy ? HIT.bossBullet : HIT.bullet));
+      // 档次决定这一下有多重（见 config 的 BULLET_HIT）。精英弹还额外带
+      // 「挡不住」—— 它连护盾一起无视，所以要把这个标志传到结算那一步
+      this.hurtPlayer(this.takenDamage(BULLET_HIT[bullet.tier]), bullet.unblockable);
     });
     this.physics.add.overlap(this.player, this.enemies, (_p, e) => {
       const enemy = e as unknown as Enemy;
@@ -260,6 +291,9 @@ export class GameScene extends Phaser.Scene {
     this.hud = new Hud(this);
     // 暗角压在战场之上、HUD 和横幅之下
     this.vignette = this.add.graphics().setDepth(90);
+    // 激光在暗角之下、闪电（21）附近：它是战场元素，不该盖住 HUD
+    this.laserGfx = this.add.graphics().setDepth(21).setBlendMode(Phaser.BlendModes.ADD);
+    this.nextLaserTick = 0;
 
     this.keys = this.input.keyboard!.addKeys('W,A,S,D,UP,DOWN,LEFT,RIGHT,X,K,P,ESC,M,SPACE,SHIFT,F') as Record<KeyName, Phaser.Input.Keyboard.Key>;
     const kb = this.input.keyboard!;
@@ -372,6 +406,7 @@ export class GameScene extends Phaser.Scene {
     if (this.combo > 0 && time > this.comboUntil) this.combo = 0;
     this.boss?.tick(time, delta);
     this.arsenal.update(time, delta);
+    this.updateLasers(time);
     this.runDirector(time);
 
     this.hud.update({
@@ -383,6 +418,7 @@ export class GameScene extends Phaser.Scene {
       level: this.level,
       xp: this.xp,
       xpNeed: xpToNext(this.level),
+      maxed: this.level >= PLAYER.maxLevel,
       player: p,
       boss: this.boss,
     });
@@ -453,7 +489,9 @@ export class GameScene extends Phaser.Scene {
   /** 从指定边生成一架敌机 */
   private spawn(side: EntrySide, kind: EnemyKind, u: number, back: number, opts: SpawnOpts = {}): void {
     const p = this.entry(side, u, back);
-    this.spawnEnemy(kind, p.x, p.y, { ...opts, angle: p.angle });
+    // 阶跃档数在这里统一发下去。只有精英机吃它，别的机型读了也不用 ——
+    // 但发在这一处，就不必每次加新机型都记得带上
+    this.spawnEnemy(kind, p.x, p.y, { ...opts, angle: p.angle, tier: stageTier(this.stage) });
   }
 
   private pickSide(): EntrySide {
@@ -479,6 +517,42 @@ export class GameScene extends Phaser.Scene {
     if (this.stage >= 3 && Math.random() < Math.min(0.5, 0.12 + this.stage * 0.05)) {
       this.wavePattern(this.pick(Math.random() < 0.6 ? GUN_PATTERNS : BULK_PATTERNS));
     }
+    this.spawnSpecials();
+  }
+
+  /**
+   * 精英机和激光机。两个都**不算编队**：各自挑一条边、单独进场。
+   * 混在队形里飞进来的话，玩家会把它当成「又一架小飞机」，它就不精英了。
+   */
+  private spawnSpecials(): void {
+    // 第 5 关之前、以及每一关的前 5 波，这两种都不该出现（见 SPECIAL_FROM_STAGE）
+    if (this.stage < SPECIAL_FROM_STAGE || this.waveCount < SPECIAL_FROM_WAVE) return;
+    // 精英机：从这一波起每一波都掺，但场上同时几架有上限 —— 它血厚，
+    // 堆起来只会把战斗拖成磨血，而不是变难。
+    // 第 10 关之后这个上限一关抬一级（见 config 的 STEP），一波里能掺进来的架数
+    // 也跟着涨：它是「难度一关比一关高一档」唯一那个还能一直往上走的着力点
+    const room = eliteCap(this.stage) - this.countKind('elite');
+    for (let i = 0; i < Math.min(room, elitePerWave(this.stage)); i++) this.spawnOne('elite');
+    // 激光机：概率很低。它不开弹，作用是封走位 —— 一屏幕都是线的话，
+    // 玩家反而无处可站，那就从「逼你挪窝」变成「不让你玩」了
+    if (Math.random() < LASER_CHANCE && this.countKind('laser') < LASER_MAX(this.stage)) this.spawnOne('laser');
+  }
+
+  /** 单独一架，从自己挑的边进场（不排队形，所以不用管纵深限制） */
+  private spawnOne(kind: EnemyKind): void {
+    const side = this.pickSide();
+    this.lastSide = side;
+    const span = side === 'top' || side === 'bottom' ? GAME_W : GAME_H;
+    this.spawn(side, kind, Phaser.Math.Between(120, span - 120), 0);
+  }
+
+  /** 场上还有几架这个机型 */
+  private countKind(kind: EnemyKind): number {
+    let c = 0;
+    this.eachEnemy((e) => {
+      if (e.kind === kind) c++;
+    });
+    return c;
   }
 
   /** 从一摞编队里挑一个「这一关已经放出来」的 */
@@ -698,8 +772,13 @@ export class GameScene extends Phaser.Scene {
       this.waveCount = 0;
       this.phase = 'waves';
       this.nextWaveAt = this.time.now + 1500;
-      // 把关数背后的强度也报出来：难度是后段加速的，玩家该看得见自己被推着走
-      this.banner(`STAGE ${this.stage}`, COLORS.cyan, 1800, `敌方强度 ×${this.diff.toFixed(1)}`);
+      // 把关数背后的强度也报出来：难度是后段加速的，玩家该看得见自己被推着走。
+      // 第 10 关之后「强度」那个数就不太说明问题了（乘数还在涨，但底下的东西都封顶了），
+      // 真正在变的是精英机的配额，所以改成报它 —— 台阶要看得见才叫台阶
+      const sub = this.stage > STEP.fromStage
+        ? `敌方强度 ×${this.diff.toFixed(1)} · 精英机 ×${eliteCap(this.stage)}`
+        : `敌方强度 ×${this.diff.toFixed(1)}`;
+      this.banner(`STAGE ${this.stage}`, COLORS.cyan, 1800, sub);
     });
   }
 
@@ -765,6 +844,87 @@ export class GameScene extends Phaser.Scene {
       const e = o as Enemy;
       if (e.active) fn(e);
     }
+  }
+
+  // ───────── 激光 ─────────
+
+  /**
+   * 画激光并结算灼烧。方向是敌机在起手那一刻锁死的（见 Enemy 的 laserAngle），
+   * 这里只管画和判，不再碰角度 —— 会跟着玩家转的话它就成鞭子了，
+   * 而它要的是「把你现在站的地方封掉，你自己挪」
+   */
+  private updateLasers(time: number): void {
+    const g = this.laserGfx;
+    g.clear();
+    const p = this.player;
+    // 光束要一直画到屏幕外，否则会在屏幕当中凭空断掉
+    const far = Math.hypot(GAME_W, GAME_H);
+    const w = LASER.halfWidth;
+    let burning = false;
+    this.eachEnemy((e) => {
+      // 只认「正在走」的那一轮。laserFireUntil 已经是过去时 = 打完了；
+      // 这架被打掉的话它根本不会进这个循环，光束跟着一起消失
+      if (e.kind !== 'laser' || !e.laserFireUntil || time >= e.laserFireUntil) return;
+      const ex = e.x + Math.cos(e.laserAngle) * far;
+      const ey = e.y + Math.sin(e.laserAngle) * far;
+      if (time < e.laserWarnUntil) {
+        // 预警：细细一条，一闪一闪。它是通知不是伤害，所以画得细 ——
+        // 「还有得躲」和「已经在烧」必须一眼分得开
+        const k = 1 - (e.laserWarnUntil - time) / LASER.warnMs;
+        g.lineStyle(2, COLORS.red, 0.25 + 0.5 * Math.abs(Math.sin(k * Math.PI * 6)));
+        g.lineBetween(e.x, e.y, ex, ey);
+        return;
+      }
+      // 灼烧：由宽到窄三层，最里面那根白的才是芯
+      g.lineStyle(w * 3, COLORS.orange, 0.13);
+      g.lineBetween(e.x, e.y, ex, ey);
+      g.lineStyle(w * 1.3, COLORS.orange, 0.45);
+      g.lineBetween(e.x, e.y, ex, ey);
+      g.lineStyle(2.6, COLORS.white, 0.92);
+      g.lineBetween(e.x, e.y, ex, ey);
+      if (p.alive && this.laserHits(e, p.x, p.y)) burning = true;
+    });
+    // 站进光束里就按 tick 掉血，而不是「碰到一次算一次」—— 蹭一下和站满一秒
+    // 本来就该是两个代价，持续伤害这四个字就在这里
+    if (burning && time >= this.nextLaserTick) this.laserTick(time);
+  }
+
+  /**
+   * 玩家在不在光束里：把玩家投到那条射线上，投影为正（在出光口前方，
+   * 不是背后的反向延长线）且垂距在「光束半宽 + 机身判定圈」以内就算中。
+   * 按射线算而不是线段，因为光束本来就画到屏幕外
+   */
+  private laserHits(e: Enemy, px: number, py: number): boolean {
+    const dx = px - e.x;
+    const dy = py - e.y;
+    const c = Math.cos(e.laserAngle);
+    const s = Math.sin(e.laserAngle);
+    if (dx * c + dy * s < 0) return false;
+    return Math.abs(dy * c - dx * s) <= LASER.halfWidth + BODY_R;
+  }
+
+  /**
+   * 激光灼烧一下。**刻意不走 hurtPlayer** —— 那个会给 1.5 秒受击无敌，
+   * 站在光束里反而成了全程免疫，正好和「把你从这儿赶走」拧着来。
+   * 护盾照旧先顶（激光不是精英弹，挡得住），冲刺的无敌帧也照旧有效 ——
+   * 冲过去是留给玩家的操作空间，不是漏洞
+   */
+  private laserTick(time: number): void {
+    this.nextLaserTick = time + LASER.tickMs;
+    const p = this.player;
+    if (!p.alive || p.invulnerable) return;
+    if (p.shield > 0) {
+      p.shield--;
+      p.invulnUntil = time + 800;
+      audio.shield();
+      this.explode(p.x, p.y, COLORS.cyan, 0.4);
+      return;
+    }
+    p.hp -= this.takenDamage(HIT.laser);
+    this.hurtAt = time;
+    audio.hurt();
+    this.flash(p);
+    if (p.hp <= 0) this.killPlayer();
   }
 
   /** 清除敌弹；传 radius 时只清玩家附近的 */
@@ -889,12 +1049,27 @@ export class GameScene extends Phaser.Scene {
     p.graze(now);
   }
 
+  /**
+   * 吃经验。到 PLAYER.maxLevel 就停 —— 技能点满一共 55 点，60 级本来就点得完，
+   * 再往上加只是让等级条继续跑，对局里没有任何东西会变；把线画在这儿，
+   * 「满级」才是一件看得见的事。
+   * 满级之后经验条清空显示 MAX，不再攒着：攒着的话它会在满格上一直亮着，
+   * 看着像「马上又要升级」，其实永远升不了
+   */
   private gainXp(amount: number): void {
+    if (this.level >= PLAYER.maxLevel) {
+      this.xp = 0;
+      return;
+    }
     this.xp += amount * this.player.xpMul;
     while (this.xp >= xpToNext(this.level)) {
       this.xp -= xpToNext(this.level);
       this.level++;
       this.pendingLevels++;
+      if (this.level >= PLAYER.maxLevel) {
+        this.xp = 0;
+        break;
+      }
     }
   }
 
@@ -937,6 +1112,7 @@ export class GameScene extends Phaser.Scene {
     this.nextWaveAt += d;
     this.bossAt += d;
     this.dashBossAt += d;
+    this.nextLaserTick += d;
     this.activePlayerBullets().forEach((b) => b.shift(d));
     this.arsenal.shift(d);
     this.input.keyboard?.resetKeys();
@@ -966,11 +1142,15 @@ export class GameScene extends Phaser.Scene {
     return found;
   }
 
-  /** 扣血。护盾先顶，护盾没破就不掉血 */
-  private hurtPlayer(dmg: number): void {
+  /**
+   * 扣血。护盾先顶，护盾没破就不掉血。
+   * `unblockable` 是精英弹那条线：护盾对它无效，直接进扣血那一步 ——
+   * 所以精英机逼的是「躲」，而不是「多囤几个盾」。
+   */
+  private hurtPlayer(dmg: number, unblockable = false): void {
     const p = this.player;
     this.cameras.main.shake(180, 0.01);
-    if (p.shield > 0) {
+    if (p.shield > 0 && !unblockable) {
       p.shield--;
       p.invulnUntil = this.time.now + 800;
       audio.shield();
@@ -1103,8 +1283,16 @@ export class GameScene extends Phaser.Scene {
     const kind = pu.kind;
 
     if (kind === 'xp') {
+      // 满级之后经验没处可去，晶体按分数回收 —— 不然这一地的晶体捡起来
+      // 什么都不会发生，看着像坏了。等级那条线停了，分数这条还开着
+      const maxed = this.level >= PLAYER.maxLevel;
       this.gainXp(pu.value);
       audio.pickup();
+      if (maxed) {
+        this.score += pu.value * 100;
+        this.floatText(p.x, p.y - 44, `+${pu.value * 100}`, COLORS.yellow, 16);
+        return;
+      }
       this.floatText(p.x, p.y - 44, `+${pu.value} EXP`, COLORS.blue, 16);
       return;
     }

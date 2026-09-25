@@ -12,11 +12,11 @@ const DOWN = Math.PI / 2;
 /** 出招前的抬手时间：先亮一下、涨一圈，玩家有时间挪位，这一招才躲得掉 */
 const TELEGRAPH_MS = 340;
 /**
- * Boss 打出去的每一发都是重弹：挨上一下按 Boss 那一档扣血（见 config 的 HIT.bossBullet）。
- * 提成一个常量而不是每发写一个 `{ heavy: true }` —— 环形弹一次就是三十几发，
- * 每发 new 一个只为传一个布尔值，没必要
+ * Boss 打出去的每一发都是重弹：挨上一下按 Boss 那一档扣血（见 config 的 BULLET_HIT）。
+ * 提成一个常量而不是每发写一个对象字面量 —— 环形弹一次就是三十几发，
+ * 每发 new 一个只为传一个档次，没必要
  */
-const HEAVY: BulletOpts = { heavy: true };
+const HEAVY: BulletOpts = { tier: 'boss' };
 
 export class Boss extends Phaser.Physics.Arcade.Sprite {
   hp: number;

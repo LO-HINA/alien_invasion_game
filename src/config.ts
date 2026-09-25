@@ -61,6 +61,12 @@ export const PLAYER = {
   maxBombs: 5,
   maxShield: 3,
   maxWeapon: 5,
+  /**
+   * 等级上限。60 级是量出来的，不是拍的：所有技能点满一共要 55 点，
+   * 开局 1 级，所以 56 级刚好全满 —— 留几级余量，让「点满之后还能拿紧急维修」
+   * 这件事发生在最后几级，而不是整整十级都在空转
+   */
+  maxLevel: 60,
   hitInvulnMs: 1500,
   /** 升级选完技能后的短暂无敌，防止刚回到战斗就被打中 */
   levelUpInvulnMs: 1000,
@@ -85,11 +91,22 @@ export const HIT = {
   /** 吃一发敌弹（第 1 关占血条的多少） */
   bullet: 0.12,
   /**
+   * 吃一发精英机的弹。精英弹同时还是「无视护盾」的（见 Bullet.unblockable），
+   * 所以它比杂兵弹重，但又比 Boss 弹轻一点 —— 精英机是会反复出现的，
+   * 按 Boss 那一档给的话，后期场上同时两架就变成沾一下就死
+   */
+  eliteBullet: 0.15,
+  /**
    * 吃一发 Boss 的弹。单独一项，不走 bullet —— Boss 一场就一个，
    * 它的弹要是和杂兵一个价，那「躲 Boss 的弹」和「躲小飞机的弹」就没有轻重之分了。
    * 1.5 倍：第 1 关 18% 对 12%，挨两下就过半血
    */
   bossBullet: 0.18,
+  /**
+   * 激光每 tick 掉多少。比一发敌弹轻得多（一半），因为它一秒能 tick 三下 ——
+   * 按一发敌弹给的话，在光束里站满一秒就是 36%，那它不是「逼你走开」而是秒杀了
+   */
+  laser: 0.06,
   /** 撞上一架敌机 */
   ram: 0.2,
   /** 被 Boss 撞到 */
@@ -107,6 +124,73 @@ export const HIT = {
 export function hitDamage(base: number, stage: number, maxHp: number): number {
   return maxHp * Math.min(HIT.maxRatio, base + (stage - 1) * HIT.perStage);
 }
+
+/**
+ * 敌弹分档。HIT 那张表说的是「怎么掉血」，这一项说的是「哪颗弹算哪一档」。
+ *
+ * 分档是为了让不同的敌人有不同的分量：杂兵弹满屏都是，挨一下就是挠痒；
+ * 精英弹和 Boss 弹少得多，但每一下都该让你记住。
+ */
+export type BulletTier = 'grunt' | 'elite' | 'boss';
+
+/** 敌弹档次 → 基础伤害比例 */
+export const BULLET_HIT: Record<BulletTier, number> = {
+  grunt: HIT.bullet,
+  elite: HIT.eliteBullet,
+  boss: HIT.bossBullet,
+};
+
+/**
+ * 精英机：**第 5 关起**、而且那一关也要过掉前 5 波才开始出现（见 GameScene 的
+ * SPECIAL_FROM_STAGE —— 两个条件管的不是一回事，别只写波数：波数每关归零，
+ * 只卡波数的话第一关的第 6 波就会来一架）。
+ * 打的是红色的弹 —— 那种弹**无视护盾、也穿得过环绕光球**，只能靠躲。
+ *
+ * 它和杂兵最大的区别是**属性不封顶**：杂兵的血 / 速度 / 射速全都有上限（见 DIFF），
+ * 后期难度只能靠数量和弹幕密度堆，堆到一定程度就只剩「糊脸」；
+ * 精英机是替玩家记住「你变强了，对面也在变强」的那一个 —— 它一级一级往上走，没有顶。
+ */
+export const ELITE = {
+  /**
+   * 血量随难度倍率往上乘，不封顶。**这是把精英机留在牌桌上的唯一一个数**：
+   * 玩家的伤害是乘起来的（主炮扩散 × 高能弹头 × 急速装填），线性涨的血迟早会被甩开，
+   * 所以这里的系数给得比杂兵的（DIFF.hp，0.22）大得多
+   */
+  hpPerStage: 0.7,
+  /** 开火间隔的基础值 */
+  fireMs: 1500,
+  /** 射速随难度提升：间隔缩到 1/(1 + 难度 × 这个数) */
+  firePerStage: 0.09,
+  /** 一轮几发、张角、弹速 */
+  shots: 3,
+  spread: 0.2,
+  speed: 250,
+};
+
+/**
+ * 激光机：全场最少的机型，存在的意义不是打伤害，是**封走位**。
+ *
+ * 它不开弹，只按一条方向拉一道激光，而起手有预警线 —— 所以它治的不是「会不会躲」，
+ * 是「能不能一直待在同一个地方」。玩家技能点满之后最常见的退化就是缩在角落清屏，
+ * 这一台就是专门来拆那套的：激光方向锁在你当时站的位置，不跟着你转，
+ * 所以你只能挪窝；挪不挪得掉是另一回事，但它逼你每隔几秒重做一次决定
+ */
+export const LASER = {
+  /** 预警线亮多久。够看清方向、够挪出去，又不至于让你有机会打完手里这一轮 */
+  warnMs: 900,
+  /** 灼烧持续多久 */
+  fireMs: 1300,
+  /** 一轮打完歇多久，然后重新锁定一个新方向 */
+  restMs: 2600,
+  /**
+   * 激光半宽（像素）。判定按「点到射线的距离」算，机身判定圈只有 5 像素，
+   * 所以这个数基本就是光束的视觉半宽。给 9 是让它成为一条真正的「车道」——
+   * 太窄了可以从缝里站着不动，那它就白来了
+   */
+  halfWidth: 9,
+  /** 每 tick 的间隔。三次一秒：密到有「一直烫」的感觉，又不会一帧一次把屏幕糊满飘字 */
+  tickMs: 330,
+};
 
 /** 修复道具回多少血 */
 export const HEAL_AMOUNT = 40;
@@ -160,9 +244,60 @@ export function stageDiff(stage: number): number {
   return 1 + s * DIFF.perStage + s * s * DIFF.accel;
 }
 
-/** 编队规模倍率：一波里到底飞进来多少架 */
+/**
+ * 第 10 关之后的**阶跃**。
+ *
+ * DIFF 那套是平滑曲线，而且它的四个着力点（血 / 速度 / 射速 / 编队规模）各自都封了顶 ——
+ * 那是对的，不封顶就没有手感也没有帧率。但它有个副作用：四个盖子大约在第 9 关就全盖满了，
+ * 往后 `diff` 还在涨，却推不动任何一个东西了。满技能玩家打到第 12 关会觉得和第 9 关一模一样。
+ *
+ * 阶跃补的就是这一段：从第 10 关起**每过一关硬踩一级**，而且着力点必须落在没封顶的地方 ——
+ * 也就是精英机。每过一关：
+ *   · 场上同时能站几架精英机 +1（到 eliteMax 为止；再多就只是围殴，不是难度了）
+ *   · 精英机的血再乘一道（和 ELITE.hpPerStage 叠着走，始终不给它封顶）
+ *   · 一波里最多掺进来几架精英机 +1 级
+ *   · 编队规模的上限本身也往上抬一点 —— 这是全场唯一一处「封了顶还继续涨」的敌机数量，
+ *     所以它单独有个 packCeiling：先顶不住的是帧率，不是难度
+ *
+ * 一句话：前面靠「敌人变强」，这里靠「精英机变多、变硬」，两条线分开调。
+ */
+export const STEP = {
+  /** 从第几关开始踩台阶。第 10 关这一档是 0，也就是从第 10 关往后才开始 */
+  fromStage: 10,
+  /** 精英机同时在场数的天花板 */
+  eliteMax: 6,
+  /** 精英机血量每一档额外乘的比例。0.15 是量着玩家满配的火力给的（约 250 伤害/秒） */
+  hpPerStage: 0.15,
+  /** 一波里最多掺几架精英机的天花板 */
+  perWaveMax: 3,
+  /** 编队规模上限每一档抬多少 */
+  packPerStage: 0.05,
+  /** 编队规模上限的天花板。这一项直接换帧率，别再往上加了（见 DIFF.pack 那段） */
+  packCeiling: 1.5,
+};
+
+/** 第 10 关之后的阶跃档数：第 10 关是 0 档，之后每关 +1，不封顶 */
+export function stageTier(stage: number): number {
+  return Math.max(0, stage - STEP.fromStage);
+}
+
+/** 阶跃档数 → 精英机同时在场数。第 10 关之前沿用 2 架 */
+export function eliteCap(stage: number): number {
+  return Math.min(STEP.eliteMax, 2 + stageTier(stage));
+}
+
+/** 阶跃档数 → 一波里最多掺几架精英机。第 10 关之前就是 1 架 */
+export function elitePerWave(stage: number): number {
+  return Math.min(STEP.perWaveMax, 1 + Math.floor(stageTier(stage) / 3));
+}
+
+/**
+ * 编队规模倍率：一波里到底飞进来多少架。
+ * 第 10 关之后在原有上限之上按档继续抬，抬到 packCeiling 为止
+ */
 export function stagePack(stage: number): number {
-  return Math.min(DIFF.packMax, 1 + (stage - 1) * DIFF.pack);
+  const base = Math.min(DIFF.packMax, 1 + (stage - 1) * DIFF.pack);
+  return Math.min(STEP.packCeiling, base + stageTier(stage) * STEP.packPerStage);
 }
 
 /**

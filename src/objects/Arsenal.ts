@@ -104,6 +104,9 @@ export class Arsenal {
       }
     });
     this.game.eachEnemyBullet((b) => {
+      // 精英弹挡不住（见 Bullet.unblockable）：光球碰上去只是白炸一下，
+      // 弹照样穿过去打中玩家 —— 那还不如让玩家一眼看出它穿了过去
+      if (b.unblockable) return;
       for (const orb of this.orbs) {
         if (near(orb, b, 18)) {
           this.game.explodeAt(b.x, b.y, COLORS.cyan, 0.15);

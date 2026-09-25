@@ -36,8 +36,8 @@ const EXHAUST_BACK = 26 * PLAYER.scale;
  * 连射时看着像子弹凭空从球里冒出来
  */
 const SHELL_R = 22 * PLAYER.scale;
-/** 判定点半径，比外形小得多，方便在弹幕里穿行 */
-const BODY_R = 5;
+/** 判定点半径，比外形小得多，方便在弹幕里穿行。激光的判定要用到它，所以导出 */
+export const BODY_R = 5;
 /** 擦弹后判定点涨一圈的时长 */
 const CORE_PULSE_MS = 140;
 

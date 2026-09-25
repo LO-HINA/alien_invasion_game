@@ -113,6 +113,38 @@ export function generateTextures(scene: Phaser.Scene): void {
     up([[-17, 0], [14, -14], [7, 0], [14, 14]]),
   ]);
 
+  // 精英机：一身重甲 + 正中一颗红芯。红色是它的语言 —— 它打出来的弹也是红的，
+  // 玩家学会「红的挡不住」之后，看见这个颜色就知道该认真躲了。
+  //
+  // 个头**刻意压到小机那一档**（原来 84×84，比旋舞机和轰炸机都大，收到 62 之后
+  // 还是比射击机显眼，所以再收一道）。它的辨识度来自颜色和那颗红芯，不来自体积 ——
+  // 而它一场里要同时站 2 到 6 架、一挂就是十几秒，画大了屏幕上就只剩几块红疙瘩，
+  // 杂兵全被压没了存在感。危险靠颜色说就够了，不用靠体积再说一遍
+  make(scene, 'elite', 52, 52, (g, cx, cy) => {
+    const hull: Pt[] = up([
+      [-20, 0], [-12, -13], [6, -18], [18, -9], [20, 0], [18, 9], [6, 18], [-12, 13],
+    ]);
+    fillPoly(g, hull, cx, cy, COLORS.red, 0.2);
+    glow(g, COLORS.red, polyPath(hull, cx, cy));
+    // 内层再描一圈，重甲才有厚度
+    glow(g, COLORS.red, polyPath(up([[-12, 0], [-6, -8], [5, -11], [11, -5], [12, 0], [11, 5], [5, 11], [-6, 8]]), cx, cy), 0.8);
+    glow(g, COLORS.cyan, circlePath(5, cx, cy), 0.8);
+    g.fillStyle(COLORS.white, 0.95);
+    g.fillCircle(cx, cy, 3);
+  });
+
+  // 激光机：一个朝下的发射口，两侧散热片。贴图本身不画光束 ——
+  // 光束是每帧现画的（见 GameScene.updateLasers），因为它的长度要跨出屏幕。
+  // 个头和精英机一起收到小机一档：它不靠块头立威，靠的是那道光束
+  make(scene, 'laser', 56, 56, (g, cx, cy) => {
+    glow(g, COLORS.orange, circlePath(18, cx, cy));
+    glow(g, COLORS.orange, polyPath(up([[-10, -14], [10, -14], [6, 16], [-6, 16]]), cx, cy), 0.9);
+    for (const s of [-1, 1]) glow(g, COLORS.orange, polyPath(up([[s * 16, -10], [s * 24, -4], [s * 24, 4], [s * 16, 9]]), cx, cy), 0.8);
+    // 出光口：亮一颗白点，朝向一目了然
+    g.fillStyle(COLORS.white, 0.95);
+    g.fillCircle(cx, cy + 13, 3.5);
+  });
+
   make(scene, 'shooter', 60, 60, (g, cx, cy) => {
     const hexPts = regular(6, 18);
     fillPoly(g, hexPts, cx, cy, COLORS.green);
@@ -225,6 +257,15 @@ export function generateTextures(scene: Phaser.Scene): void {
     });
   bulletTex('ebullet', COLORS.magenta);
   bulletTex('ebullet2', COLORS.orange);
+  // 精英弹：红色 + 带外的尖角。形状也要不一样 —— 「无视护盾、只能躲」这件事
+  // 得在子弹还在半路的时候就看得出来，等它穿过光球玩家才明白就晚了
+  make(scene, 'ebullet4', 26, 26, (g, cx, cy) => {
+    const spike: Pt[] = [[0, -12], [5, -5], [12, 0], [5, 5], [0, 12], [-5, 5], [-12, 0], [-5, -5]];
+    fillPoly(g, spike, cx, cy, COLORS.red, 0.35);
+    glow(g, COLORS.red, polyPath(spike, cx, cy), 0.7);
+    g.fillStyle(COLORS.white, 1);
+    g.fillCircle(cx, cy, 3);
+  });
   // 高速弹单独一个外形：细长的一条，形状本身就在说「这个快」。
   // 圆弹和快弹共用一颗球的话，玩家没法一眼分清该躲哪个。
   // 颜色避开自机的青 / 僚机的绿 / 导弹的橙，免得看错是谁打的。

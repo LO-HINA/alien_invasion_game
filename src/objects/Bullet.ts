@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { BULLET, GAME_H, GAME_W } from '../config';
+import { BULLET, type BulletTier, GAME_H, GAME_W } from '../config';
 
 export interface BulletOpts {
   /** 还能撞几次墙（0 = 撞墙即消失） */
@@ -9,11 +9,16 @@ export interface BulletOpts {
   /** 命中判定半径 */
   radius?: number;
   /**
-   * 重弹：挨上一下掉的血按 Boss 那一档算。
-   * 只在敌方子弹上有意义 —— 不吃这一项的话，Boss 的弹和杂兵的弹在结算那一步
-   * 完全一样，想单独加强 Boss 就只能去动全局的 HIT.bullet，顺带把所有杂兵也加强了
+   * 伤害档次，不填按杂兵弹算（见 config 的 BULLET_HIT）。
+   * 不吃这一项的话，Boss 的弹、精英的弹和杂兵的弹在结算那一步完全一样，
+   * 想单独加强某一个就只能去动全局，顺带把所有敌人都加强了
    */
-  heavy?: boolean;
+  tier?: BulletTier;
+  /**
+   * 挡不住：无视护盾，也穿得过环绕光球。
+   * 精英机的弹靠它变成「只能躲」—— 玩家堆起来的那些防御手段对它一律无效
+   */
+  unblockable?: boolean;
 }
 
 export class Bullet extends Phaser.Physics.Arcade.Sprite {
@@ -25,8 +30,10 @@ export class Bullet extends Phaser.Physics.Arcade.Sprite {
   speed = 0;
   /** 玩家子弹会撞墙反弹；敌弹撞墙即消失 */
   friendly = true;
-  /** 重弹：这一发是 Boss 打的，挨上掉的血更多（见 config 的 HIT.bossBullet） */
-  heavy = false;
+  /** 伤害档次：这一发是谁打的（见 config 的 BulletTier） */
+  tier: BulletTier = 'grunt';
+  /** 挡不住：无视护盾，也穿得过环绕光球 */
+  unblockable = false;
   /** 这颗敌弹已经从机身旁边擦过去了（每颗只算一次，靠得太近时会连着好几帧都在圈里） */
   grazed = false;
   private bounces = 0;
@@ -48,7 +55,8 @@ export class Bullet extends Phaser.Physics.Arcade.Sprite {
     this.homing = false;
     this.speed = speed;
     this.friendly = !texture.startsWith('e');
-    this.heavy = opts.heavy ?? false;
+    this.tier = opts.tier ?? 'grunt';
+    this.unblockable = opts.unblockable ?? false;
     this.grazed = false;
     this.hitSet.clear();
     const body = this.body as Phaser.Physics.Arcade.Body;
