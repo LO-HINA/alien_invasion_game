@@ -1,6 +1,5 @@
 import Phaser from 'phaser';
 import { CN_FONT, COLORS, GAME_H, GAME_W, TURRET_FWD } from '../config';
-import { ENEMY_DEFS } from '../objects/Enemy';
 import { audio } from '../systems/audio';
 import { restartOnResize } from '../systems/resize';
 import { Starfield } from '../systems/starfield';
@@ -16,21 +15,6 @@ const CONTROLS: [string, string][] = [
   ['暂停', 'P / ESC / 右上角按钮'],
   ['全屏', 'F'],
   ['音乐', 'M'],
-];
-
-const TIPS = [
-  '机身跟着移动方向转，机头朝哪子弹就往哪打',
-  '主炮一轮三连发，撞墙会反弹，弹道能绕到掩体后面',
-  '右上角血条掉光就结束；机身中心亮点是判定点，贴着弹擦过能加分',
-  '击落后经验掉在原地，靠近了才会被吸过来',
-  '升级三选一强化，都不中意可以按 R 重随（一局就几次）',
-];
-
-/** 敌机图鉴：只写「长什么样 + 怎么打你」。行要短，小窗在横屏下并不宽 */
-const ENEMIES = [
-  '杂兵 紫菱形 · 游走 橙箭 · 点射 绿六角',
-  '自爆冲锋 红镖 · 重装 紫八边 · 狙击 青矛（蓄力后一发快弹）',
-  '旋舞弹幕 紫风车 · 分裂 品红球（爆开成两架） · 环形轰炸 橙宽体',
 ];
 
 export class MenuScene extends Phaser.Scene {
@@ -67,8 +51,6 @@ export class MenuScene extends Phaser.Scene {
     this.tweens.add({ targets: prompt, alpha: 0.2, duration: 600, yoyo: true, repeat: -1 });
 
     const helpBtn = this.helpButton(GAME_W / 2, y(0.688));
-    // 机型数量直接从表里数，加一种敌机这里跟着变
-    neonText(this, GAME_W / 2, y(0.78), `机身朝哪打哪 · ${Object.keys(ENEMY_DEFS).length} 种敌机 · 撑过敌潮遇见 Boss`, 15, COLORS.blue);
 
     neonText(this, GAME_W / 2, GAME_H - 40, `HI-SCORE ${loadHighScore()}`, 16, COLORS.magenta);
 
@@ -105,13 +87,10 @@ export class MenuScene extends Phaser.Scene {
     audio.select();
     const w = Math.min(660, GAME_W - 40);
     const rowH = 32;
-    const tipH = 30;
     const head = 92;
     const foot = 48;
     const pad = 34;
-    /** 敌机图鉴那一块：一行小标题 + 几行短句 */
-    const foeH = 20 + ENEMIES.length * 24;
-    const h = Math.min(GAME_H - 60, head + CONTROLS.length * rowH + 26 + TIPS.length * tipH + 12 + foeH + foot);
+    const h = Math.min(GAME_H - 60, head + CONTROLS.length * rowH + foot);
     const left = GAME_W / 2 - w / 2;
     const top = GAME_H / 2 - h / 2;
 
@@ -132,24 +111,6 @@ export class MenuScene extends Phaser.Scene {
     box.add(g);
     box.add(neonText(this, GAME_W / 2, top + 34, '玩 法 说 明', 26, COLORS.cyan));
     box.add(this.column(left + pad, top + head - 26, w - pad * 2, CONTROLS, rowH, COLORS.yellow));
-
-    const tipsTop = top + head + CONTROLS.length * rowH + 4;
-    box.add(this.add.text(left + pad, tipsTop, '要 点', { fontFamily: CN_FONT, fontSize: '16px', color: '#ffe94d' }));
-    box.add(
-      this.add.text(left + pad, tipsTop + 26, TIPS.map((s) => `· ${s}`).join('\n'), {
-        fontFamily: CN_FONT, fontSize: '15px', color: '#c8d4ff', lineSpacing: tipH - 16,
-      })
-    );
-
-    // 敌机图鉴：新机型越出越多，得让玩家知道谁在打他
-    const foeTop = tipsTop + 26 + TIPS.length * tipH + 8;
-    box.add(this.add.text(left + pad, foeTop, '敌 机', { fontFamily: CN_FONT, fontSize: '16px', color: '#ffe94d' }));
-    const foe = this.add.text(left + pad, foeTop + 24, ENEMIES.join('\n'), {
-      fontFamily: CN_FONT, fontSize: '13px', color: '#c8d4ff', lineSpacing: 11,
-    });
-    // 兜底：哪天真加了新机型把行撑长了，缩一点也比戳出面板外面强
-    if (foe.width > w - pad * 2) foe.setScale((w - pad * 2) / foe.width);
-    box.add(foe);
     box.add(neonText(this, GAME_W / 2, top + h - 26, '点击任意处关闭', 14, COLORS.magenta));
     this.help = box;
   }
