@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { BULLET, COLORS, COMBO_WINDOW_MS, FREEZE, GAME_H, GAME_W, GRAZE, HEAL_AMOUNT, hex, HIT, HURT_VIGNETTE_MS, LEECH, MAX_MULTIPLIER, PLAYER, REROLLS, stageDiff, stagePack, XP_PICKUP, xpToNext } from '../config';
+import { BULLET, COLORS, COMBO_WINDOW_MS, FREEZE, GAME_H, GAME_W, GRAZE, HEAL_AMOUNT, hex, hitDamage, HIT, HURT_VIGNETTE_MS, LEECH, MAX_MULTIPLIER, PLAYER, REROLLS, stageDiff, stagePack, XP_PICKUP, xpToNext } from '../config';
 import { Arsenal } from '../objects/Arsenal';
 import { Boss } from '../objects/Boss';
 import { Bullet, type BulletOpts } from '../objects/Bullet';
@@ -18,22 +18,36 @@ type WavePattern = 'row' | 'column' | 'v' | 'sine' | 'shooters' | 'chargers' | '
 /** 敌机从哪条边进场 */
 type EntrySide = 'top' | 'right' | 'bottom' | 'left';
 
-// 每种编队从第几关开始出现
-const WAVE_UNLOCK: [WavePattern, number][] = [
+/**
+ * 编队分两摞：会开火的和不开火的。
+ *
+ * 一波里两摞各出一组 —— 只出「不开火的」那摞，场上就是一堆哑巴杂兵，一发弹没有；
+ * 只出「会开火的」那摞，又变成站着打靶。混着来，弹幕才一直在、同时不停有东西要躲。
+ */
+const GUN_PATTERNS: [WavePattern, number][] = [
+  ['shooters', 1],
+  ['tank', 2],
+  ['snipers', 2],
+  ['spinners', 3],
+  ['bombers', 3],
+];
+
+const BULK_PATTERNS: [WavePattern, number][] = [
   ['row', 1],
   ['column', 1],
   ['v', 1],
   ['sine', 1],
-  ['shooters', 1],
   ['chargers', 2],
-  ['tank', 2],
-  ['snipers', 2],
   ['splitters', 2],
   ['swarm', 3],
-  ['spinners', 3],
-  ['bombers', 3],
   ['rammers', 4],
 ];
+
+/** 「会开火的」机型。判断场上还有没有弹幕威胁时看这几个在不在 */
+const GUN_KINDS = new Set<EnemyKind>(['shooter', 'tank', 'sniper', 'spinner', 'bomber']);
+
+/** 场上一发弹都没有、而且快空了的时候，把下一波提前拉到这么多毫秒以内 */
+const EMPTY_PULL_MS = 900;
 
 // 四边出现概率，正面仍然是主要压力来源
 const SIDE_WEIGHT: [EntrySide, number][] = [
@@ -122,6 +136,9 @@ export class GameScene extends Phaser.Scene {
   private grazeCount = 0;
   /** 擦弹的火花与音效上次是什么时候放的，用来限流 */
   private grazeFxAt = 0;
+  /** 场上还有没有会开火的敌机、一共还剩几架。由 scanThreat 每帧刷新，别单独改 */
+  private gunsAlive = false;
+  private enemiesAlive = 0;
 
   constructor() {
     super('Game');
@@ -183,9 +200,13 @@ export class GameScene extends Phaser.Scene {
 
     // 池子按「后期最挤的一拍」开：后期一波能有二十来架，几组同时压过来就上百，
     // 取空了 get() 会返回 null、之后悄悄不刷（浸泡测试专门盯这一条），所以留足余量。
-    // 上限本身不是目标 —— 数字顶到上限就说明该调曲线了，不是该把池子开大
+    // 上限本身不是目标 —— 数字顶到上限就说明该调曲线了，不是该把池子开大。
+    // 敌弹这一格是唯一的例外，而且抬了两次：先是 Boss 加了冲刺和更密的弹幕，
+    // 接着每一波都必定带一组会开火的（见 GUN_PATTERNS）—— 峰值是真的上去了。
+    // 敌弹和敌机不一样，它没有寿命，要飞出屏幕才回收，
+    // 所以「每秒发多少」会按弹速直接乘成一个很高的在场数
     this.pBullets = this.physics.add.group({ classType: Bullet, maxSize: 400 });
-    this.eBullets = this.physics.add.group({ classType: Bullet, maxSize: 1200 });
+    this.eBullets = this.physics.add.group({ classType: Bullet, maxSize: 2200 });
     this.enemies = this.physics.add.group({ classType: Enemy, maxSize: 420, runChildUpdate: true });
     this.powerups = this.physics.add.group({ classType: PowerUp, maxSize: 40 });
     this.xpOrbs = this.physics.add.group({ classType: PowerUp, maxSize: XP_PICKUP.maxOrbs });
@@ -202,7 +223,7 @@ export class GameScene extends Phaser.Scene {
       const bullet = b as unknown as Bullet;
       if (!bullet.active || !this.player.alive || this.player.invulnerable) return;
       bullet.kill();
-      this.hurtPlayer(HIT.bullet);
+      this.hurtPlayer(this.takenDamage(bullet.heavy ? HIT.bossBullet : HIT.bullet));
     });
     this.physics.add.overlap(this.player, this.enemies, (_p, e) => {
       const enemy = e as unknown as Enemy;
@@ -221,7 +242,7 @@ export class GameScene extends Phaser.Scene {
         return;
       }
       if (p.invulnerable) return;
-      this.hurtPlayer(HIT.ram);
+      this.hurtPlayer(this.takenDamage(HIT.ram));
       // 自爆机是撞上就同归于尽（被撞是走位失误，不给分也不给经验），
       // 其余机型是被撞开、接着往外飞
       if (enemy.kind === 'rammer') this.detonate(enemy);
@@ -329,6 +350,10 @@ export class GameScene extends Phaser.Scene {
 
     const p = this.player;
     if (p.alive) {
+      // 自动瞄准：每帧把最近的敌机喂给炮口（没目标就保持上一次的方向）。
+      // 喂进去的是「想打哪」，炮口自己按 AIM_TURN_SPEED 转过去，不瞬移
+      const target = this.nearestTarget();
+      if (target) p.aimAt(target.x, target.y, delta);
       p.move(this.keys, delta);
       p.updateBlink(time);
       const shots = p.tryFire(time);
@@ -368,22 +393,47 @@ export class GameScene extends Phaser.Scene {
   // ───────── 关卡推进 ─────────
 
   private runDirector(time: number): void {
-    if (this.phase === 'waves' && time >= this.nextWaveAt) {
-      if (this.waveCount < this.wavesThisStage) {
-        this.spawnWave();
-        this.waveCount++;
-        // 每 5 波喘一口：一直顶在最高强度，玩家会从紧张变成麻木，有起伏才有爽点
-        const breath = this.waveCount % BREATH_EVERY === 0 ? BREATH_MS : 0;
-        this.nextWaveAt = time + Math.max(780, 1900 - this.stage * 120) + breath;
-      } else {
-        // 不要求清光敌人，短暂间隔后 Boss 直接登场
-        this.phase = 'boss-wait';
-        this.bossAt = time + 2500;
+    if (this.phase === 'waves') {
+      this.scanThreat();
+      // 一发弹都没有、场上又快空了 —— 把下一波拉过来。空场是最没意思的几秒，
+      // 玩家在这儿会走神。每 5 波那口喘息只要场上还有东西就不会被打断
+      if (!this.gunsAlive && this.enemiesAlive < 6 && this.nextWaveAt - time > EMPTY_PULL_MS) {
+        this.nextWaveAt = time + EMPTY_PULL_MS;
+      }
+      if (time >= this.nextWaveAt) {
+        if (this.waveCount < this.wavesThisStage) {
+          this.spawnWave();
+          this.waveCount++;
+          // 每 5 波喘一口：一直顶在最高强度，玩家会从紧张变成麻木，有起伏才有爽点
+          const breath = this.waveCount % BREATH_EVERY === 0 ? BREATH_MS : 0;
+          this.nextWaveAt = time + Math.max(780, 1900 - this.stage * 120) + breath;
+        } else {
+          // 不要求清光敌人，短暂间隔后 Boss 直接登场
+          this.phase = 'boss-wait';
+          this.bossAt = time + 2500;
+        }
       }
     } else if (this.phase === 'boss-wait' && time >= this.bossAt) {
       this.phase = 'boss';
       this.startBoss();
     }
+  }
+
+  /**
+   * 看一眼场上还有几架、其中有没有会开火的。
+   * 复用两个字段而不是每帧 new 一个对象 —— 这段每帧都跑。
+   * 这里数的是**全部**活着的敌机，不筛 onScreen：刚刷出来还在场外的那批也算数，
+   * 否则一波刚发出去、敌机还没飞进屏幕，就会被当成「空场」再拉一波过来
+   */
+  private scanThreat(): void {
+    let guns = false;
+    let total = 0;
+    this.eachEnemy((e) => {
+      total++;
+      if (!guns && GUN_KINDS.has(e.kind)) guns = true;
+    });
+    this.gunsAlive = guns;
+    this.enemiesAlive = total;
   }
 
   /** 把「从某条边入场」的编队坐标换算成世界坐标：u = 沿边的位置，back = 退到边外多远 */
@@ -418,17 +468,25 @@ export class GameScene extends Phaser.Scene {
     return 'top';
   }
 
-  /** 一波 = 一组编队。关数上去之后会同一拍再来一两组，从别的边压过来 */
+  /**
+   * 一波 = 「会开火的」一组 + 「填场面的」一组，同时压过来；关数上去还会再加一组。
+   * 每组各自挑一条边（pickSide），所以同一个波次里天然就是混着、从不同方向来的。
+   */
   private spawnWave(): void {
-    this.wavePattern();
-    if (this.stage >= 2 && Math.random() < Math.min(0.55, 0.18 + this.stage * 0.1)) this.wavePattern();
-    // 第三组的概率跟着关数涨：三面同时压过来是后期才该出现的场面
-    if (this.stage >= 4 && Math.random() < Math.min(0.6, 0.3 + (this.stage - 4) * 0.05)) this.wavePattern();
+    this.wavePattern(this.pick(GUN_PATTERNS));
+    this.wavePattern(this.pick(BULK_PATTERNS));
+    // 第三组跟着关数涨：三面同时压过来是后期才该出现的场面
+    if (this.stage >= 3 && Math.random() < Math.min(0.5, 0.12 + this.stage * 0.05)) {
+      this.wavePattern(this.pick(Math.random() < 0.6 ? GUN_PATTERNS : BULK_PATTERNS));
+    }
   }
 
-  private wavePattern(): void {
-    const pool = WAVE_UNLOCK.filter(([, s]) => this.stage >= s).map(([p]) => p);
-    const pattern = Phaser.Utils.Array.GetRandom(pool) as WavePattern;
+  /** 从一摞编队里挑一个「这一关已经放出来」的 */
+  private pick(list: [WavePattern, number][]): WavePattern {
+    return Phaser.Utils.Array.GetRandom(list.filter(([, s]) => this.stage >= s).map(([p]) => p)) as WavePattern;
+  }
+
+  private wavePattern(pattern: WavePattern): void {
     const side = this.pickSide();
     this.lastSide = side;
     // 沿这条边的可用长度
@@ -469,7 +527,9 @@ export class GameScene extends Phaser.Scene {
         break;
       }
       case 'shooters': {
-        const c = n(4 + Math.min(3, Math.floor(this.stage / 2)));
+        // 这一摞现在是每一波都出（以前是五个编队里抽一个），所以单次带的架数往下压了一半：
+        // 出得勤了，每次还带那么多的话总量是翻几倍，而不是「变密」
+        const c = n(2 + Math.min(2, Math.floor(this.stage / 3)));
         for (let i = 0; i < c; i++) this.spawn(side, 'shooter', (span * (i + 0.5)) / c, i * 30, { phase: i });
         break;
       }
@@ -569,7 +629,7 @@ export class GameScene extends Phaser.Scene {
             }
             return;
           }
-          if (!p.invulnerable) this.hurtPlayer(HIT.boss);
+          if (!p.invulnerable) this.hurtPlayer(this.takenDamage(HIT.boss));
         }),
       ];
     });
@@ -651,16 +711,16 @@ export class GameScene extends Phaser.Scene {
     return b;
   }
 
-  fireEnemy(x: number, y: number, angle: number, speed: number, texture: string): void {
+  fireEnemy(x: number, y: number, angle: number, speed: number, texture: string, opts: BulletOpts = {}): void {
     if (this.phase === 'over') return;
     const b = this.eBullets.get(x, y) as Bullet | null;
-    b?.fire(x, y, angle, speed, texture);
+    b?.fire(x, y, angle, speed, texture, 1, 0, opts);
   }
 
   /** 朝玩家方向发射 count 发扇形弹 */
-  fireEnemyAimed(x: number, y: number, speed: number, texture: string, count: number, spread: number): void {
+  fireEnemyAimed(x: number, y: number, speed: number, texture: string, count: number, spread: number, opts: BulletOpts = {}): void {
     const base = Phaser.Math.Angle.Between(x, y, this.player.x, this.player.y);
-    for (let i = 0; i < count; i++) this.fireEnemy(x, y, base + (i - (count - 1) / 2) * spread, speed, texture);
+    for (let i = 0; i < count; i++) this.fireEnemy(x, y, base + (i - (count - 1) / 2) * spread, speed, texture, opts);
   }
 
   /** 狙击机开火时的一道光，一闪就没，让这一发有来处 */
@@ -882,6 +942,30 @@ export class GameScene extends Phaser.Scene {
     this.input.keyboard?.resetKeys();
   }
 
+  /**
+   * 自动瞄准的目标：场上离玩家最近的敌机（Boss 也算一个）。
+   * 只挑进了屏幕的 —— 瞄一架还在场外的，整轮扇面会全打在空气上。
+   */
+  private nearestTarget(): Enemy | Boss | undefined {
+    const p = this.player;
+    let best = Infinity;
+    let found: Enemy | Boss | undefined;
+    this.eachEnemy((e) => {
+      if (!e.onScreen) return;
+      const d = Phaser.Math.Distance.Squared(p.x, p.y, e.x, e.y);
+      if (d < best) {
+        best = d;
+        found = e;
+      }
+    });
+    const boss = this.currentBoss;
+    if (boss) {
+      const d = Phaser.Math.Distance.Squared(p.x, p.y, boss.x, boss.y);
+      if (d < best) found = boss;
+    }
+    return found;
+  }
+
   /** 扣血。护盾先顶，护盾没破就不掉血 */
   private hurtPlayer(dmg: number): void {
     const p = this.player;
@@ -904,6 +988,14 @@ export class GameScene extends Phaser.Scene {
     if (p.hp <= 0) this.killPlayer();
   }
 
+  /**
+   * 这一下打掉多少血：按血条比例算，比例随关数涨到 99% 封顶（见 config 的 HIT）。
+   * 传的是「基础比例」不是点数 —— 后面点了强化船体，血条长了，同一下依然掉同样多比例。
+   */
+  private takenDamage(base: number): number {
+    return hitDamage(base, this.stage, this.player.maxHp);
+  }
+
   /** 回血：满了就不飘字，免得刷屏 */
   private healPlayer(amount: number): void {
     const p = this.player;
@@ -920,8 +1012,7 @@ export class GameScene extends Phaser.Scene {
     audio.explode(true);
     this.cameras.main.shake(400, 0.02);
     p.disableBody(true, true);
-    // 机身一旦 inactive，Player.preUpdate 就不再跑，炮塔得手动收掉
-    p.turret.setVisible(false);
+    // 机身一旦 inactive，Player.preUpdate 就不再跑，判定点得手动收掉
     p.core.setVisible(false);
     this.combo = 0;
 

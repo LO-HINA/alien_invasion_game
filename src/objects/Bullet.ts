@@ -8,6 +8,12 @@ export interface BulletOpts {
   lifeMs?: number;
   /** 命中判定半径 */
   radius?: number;
+  /**
+   * 重弹：挨上一下掉的血按 Boss 那一档算。
+   * 只在敌方子弹上有意义 —— 不吃这一项的话，Boss 的弹和杂兵的弹在结算那一步
+   * 完全一样，想单独加强 Boss 就只能去动全局的 HIT.bullet，顺带把所有杂兵也加强了
+   */
+  heavy?: boolean;
 }
 
 export class Bullet extends Phaser.Physics.Arcade.Sprite {
@@ -19,6 +25,8 @@ export class Bullet extends Phaser.Physics.Arcade.Sprite {
   speed = 0;
   /** 玩家子弹会撞墙反弹；敌弹撞墙即消失 */
   friendly = true;
+  /** 重弹：这一发是 Boss 打的，挨上掉的血更多（见 config 的 HIT.bossBullet） */
+  heavy = false;
   /** 这颗敌弹已经从机身旁边擦过去了（每颗只算一次，靠得太近时会连着好几帧都在圈里） */
   grazed = false;
   private bounces = 0;
@@ -40,6 +48,7 @@ export class Bullet extends Phaser.Physics.Arcade.Sprite {
     this.homing = false;
     this.speed = speed;
     this.friendly = !texture.startsWith('e');
+    this.heavy = opts.heavy ?? false;
     this.grazed = false;
     this.hitSet.clear();
     const body = this.body as Phaser.Physics.Arcade.Body;

@@ -74,23 +74,26 @@ export function generateTextures(scene: Phaser.Scene): void {
   const SHIP = PLAYER.scale;
   const SHOT = BULLET.scale;
 
-  // 玩家：朝上的箭形战机
-  shape(scene, 'player', 52, 80, COLORS.cyan, [
-    shrink(up([[30, 0], [-18, -18], [-8, 0], [-18, 18]]), SHIP),
-    shrink(up([[4, -4], [14, 0], [4, 4]]), SHIP),
-  ], undefined, SHIP);
+  // 玩家：一整颗实心球。没有机头，也没有炮塔 —— 子弹直接从球面射出去（见 Player.tryFire）。
+  // Phaser 的 Graphics 没有渐变填充，用「几层偏心圆」堆出受光面是最省事又像球的画法
+  make(scene, 'player', 56, 56, (g, cx, cy) => {
+    const r = 22 * SHIP;
+    g.fillStyle(COLORS.blue, 0.9);
+    g.fillCircle(cx, cy, r);
+    for (let i = 1; i <= 6; i++) {
+      const k = i / 6;
+      g.fillStyle(COLORS.cyan, 0.16);
+      g.fillCircle(cx - r * 0.3 * k, cy - r * 0.3 * k, r * (1 - 0.6 * k));
+    }
+    // 高光点：少了它就是一坨纯色圆饼，读不出「球」
+    g.fillStyle(COLORS.white, 0.85);
+    g.fillCircle(cx - r * 0.34, cy - r * 0.36, r * 0.15);
+    // 最外圈压一道霓虹边，和场上别的单位一个质感
+    glow(g, COLORS.cyan, circlePath(r, cx, cy), SHIP);
+  });
 
   // 僚机：缩小版玩家
   shape(scene, 'wingman', 34, 46, COLORS.green, [shrink(up([[17, 0], [-11, -11], [-5, 0], [-11, 11]]), SHIP)], undefined, SHIP);
-
-  // 炮塔：机头前方的炮口，跟着机头转，子弹从它的炮口出去
-  make(scene, 'turret', 26, 34, (g, cx, cy) => {
-    glow(g, COLORS.cyan, polyPath(shrink([[-3, 1], [-3, -14], [3, -14], [3, 1]], SHIP), cx, cy), SHIP);
-    glow(g, COLORS.white, polyPath(shrink([[-1.2, -3], [-1.2, -13], [1.2, -13], [1.2, -3]], SHIP), cx, cy), SHIP * 0.72);
-    glow(g, COLORS.cyan, circlePath(8 * SHIP, cx, cy + 2 * SHIP), SHIP * 1.05);
-    g.fillStyle(COLORS.cyan, 0.4);
-    g.fillCircle(cx, cy + 2 * SHIP, 4.5 * SHIP);
-  });
 
   // 判定点：机身中心那个亮点。判定圈半径只有 5 像素、机身看起来却有 35 像素宽，
   // 不画出来玩家只能靠感觉猜自己离弹幕还有多远，白白躲得过宽

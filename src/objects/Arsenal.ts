@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { COLORS, PLAYER, TURRET_FWD } from '../config';
+import { COLORS, MUZZLE_FWD, PLAYER } from '../config';
 import type { GameScene } from '../scenes/GameScene';
 import { audio } from '../systems/audio';
 import { REGEN_INTERVAL_MS } from '../systems/skills';
@@ -10,7 +10,7 @@ const BOSS_RADIUS = 85;
 /** 僚机的挂位与炮口都按机体比例缩，跟着 PLAYER.scale 一起变 */
 const S = PLAYER.scale;
 /** 导弹从机头前多远冒出来 */
-const MUZZLE_OFFSET = TURRET_FWD + 4 * S;
+const MUZZLE_OFFSET = MUZZLE_FWD + 4 * S;
 
 /** 升级技能的运行时：追踪导弹、环绕光球、僚机、连锁闪电、护盾充能 */
 export class Arsenal {
@@ -127,7 +127,7 @@ export class Arsenal {
   private updateWingmen(time: number): void {
     if (!this.wingmen.length) return;
     const p = this.game.player;
-    // 挂位看机身（它们是挂在机身上的），朝向和开火都看瞄准 —— 和炮塔同一条规矩：
+    // 挂位看机身（它们是挂在机身上的），朝向和开火都看瞄准 —— 和主炮同一条规矩：
     // 机身还在转的那十几帧里炮口早就对准了，僚机要是跟着机身转，
     // 就会出现「侧着身子朝反方向开火」的样子
     const h = p.heading;

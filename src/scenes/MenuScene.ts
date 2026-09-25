@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { CN_FONT, COLORS, GAME_H, GAME_W, TURRET_FWD } from '../config';
+import { CN_FONT, COLORS, GAME_H, GAME_W } from '../config';
 import { audio } from '../systems/audio';
 import { restartOnResize } from '../systems/resize';
 import { Starfield } from '../systems/starfield';
@@ -40,11 +40,8 @@ export class MenuScene extends Phaser.Scene {
     neonText(this, GAME_W / 2, y(0.266), 'STARFIGHTER', 60, COLORS.cyan);
     neonText(this, GAME_W / 2, y(0.324), '霓 虹 星 际 战 机', 26, COLORS.magenta);
 
-    // 机头和炮塔一起摆，和战斗里一个模样（整组放大 1.8 倍，炮塔离机心的距离跟着一起放）
-    const ship = this.add.container(GAME_W / 2, y(0.4375), [
-      this.add.image(0, 0, 'player').setScale(1.8),
-      this.add.image(0, -TURRET_FWD * 1.8, 'turret').setScale(1.8).setBlendMode(Phaser.BlendModes.ADD),
-    ]);
+    // 和战斗里一个模样（放大 1.8 倍）
+    const ship = this.add.container(GAME_W / 2, y(0.4375), [this.add.image(0, 0, 'player').setScale(1.8)]);
     this.tweens.add({ targets: ship, y: y(0.453), duration: 1400, yoyo: true, repeat: -1, ease: 'Sine.inOut' });
 
     const prompt = neonText(this, GAME_W / 2, y(0.547), '按 空格 / ENTER 或点击屏幕开始', 24, COLORS.yellow);

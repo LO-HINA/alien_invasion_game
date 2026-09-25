@@ -18,15 +18,20 @@ export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
   drone: { hp: 1, speed: 170, score: 100, xp: 1, color: COLORS.magenta, radius: 13, dropChance: 0.04 },
   wave: { hp: 2, speed: 150, score: 150, xp: 1, color: COLORS.orange, radius: 13, dropChance: 0.05 },
   shooter: { hp: 5, speed: 140, score: 300, xp: 3, color: COLORS.green, radius: 17, dropChance: 0.12 },
-  charger: { hp: 3, speed: 160, score: 250, xp: 2, color: COLORS.red, radius: 15, dropChance: 0.08 },
+  // 冲锋机：冲进来蓄力、再高速撞你。它是「有前摇的威胁」，玩家看到闪烁就得决定
+  // 是绕开还是打掉它 —— 3 血的话最后那半秒它就被点掉了，那个决定根本不存在。
+  // 8 血（后期 16）差不多是「专心打它两下能清掉，顺手扫一眼清不掉」的量
+  charger: { hp: 8, speed: 160, score: 250, xp: 2, color: COLORS.red, radius: 15, dropChance: 0.08 },
   tank: { hp: 24, speed: 70, score: 1000, xp: 10, color: COLORS.purple, radius: 30, dropChance: 0.5 },
   // 以下四种是后期才放出来的「有脾气」的敌机，各有各的威胁方式
   sniper: { hp: 4, speed: 130, score: 420, xp: 4, color: COLORS.cyan, radius: 15, dropChance: 0.16 },
   spinner: { hp: 7, speed: 85, score: 550, xp: 5, color: COLORS.purple, radius: 20, dropChance: 0.22 },
   splitter: { hp: 3, speed: 140, score: 320, xp: 3, color: COLORS.magenta, radius: 17, dropChance: 0.12 },
   bomber: { hp: 9, speed: 95, score: 650, xp: 6, color: COLORS.orange, radius: 22, dropChance: 0.28 },
-  // 自爆机：不打弹，一路追着你撞。血薄、速度不算快，麻烦的是它不按编队走
-  rammer: { hp: 3, speed: 155, score: 300, xp: 2, color: COLORS.yellow, radius: 14, dropChance: 0.1 },
+  // 自爆机：不打弹，一路追着你撞。速度不算快，麻烦的是它不按编队走 ——
+  // 它和冲锋机一样是「逼你动」的机型，3 血的话一边后撤一边顺手就点掉了，
+  // 那它追人的意义就没了。6 血（后期 12）刚好让「是先清它还是先躲弹」变成一道选择题
+  rammer: { hp: 6, speed: 155, score: 300, xp: 2, color: COLORS.yellow, radius: 14, dropChance: 0.1 },
 };
 
 export interface SpawnOpts {
