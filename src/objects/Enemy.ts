@@ -21,8 +21,14 @@ export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
   shooter: { hp: 5, speed: 140, score: 300, xp: 3, color: COLORS.green, radius: 17, dropChance: 0.12 },
   // 冲锋机：冲进来蓄力、再高速撞你。它是「有前摇的威胁」，玩家看到闪烁就得决定
   // 是绕开还是打掉它 —— 3 血的话最后那半秒它就被点掉了，那个决定根本不存在。
-  // 8 血（后期 16）差不多是「专心打它两下能清掉，顺手扫一眼清不掉」的量
-  charger: { hp: 8, speed: 160, score: 250, xp: 2, color: COLORS.red, radius: 15, dropChance: 0.08 },
+  //
+  // 血量 8 → 28：它是**唯一一个被刻意留下的普通机型**（换血阶段杂兵按比例退场，
+  // 它豁免，见 GameScene 的 MIX_KEEP）。后期一屏幕杂兵被精英机替掉之后，
+  // 场上还得有「数量多、逼你不停挪窝」的那一类，不然就只剩几架精英机在耗。
+  // 8 血在满配火力面前是零点几秒的事，蓄力那一秒根本撑不住，那前摇就白做了；
+  // 28 血（后期 2 倍封顶 56）刚好让「是先清它还是先躲弹」重新变成一道选择题。
+  // 刻意比重装机（24）高一档：它快、还会冲刺，血再少一点就只是个会闪的杂兵
+  charger: { hp: 28, speed: 160, score: 250, xp: 2, color: COLORS.red, radius: 15, dropChance: 0.08 },
   tank: { hp: 24, speed: 70, score: 1000, xp: 10, color: COLORS.purple, radius: 30, dropChance: 0.5 },
   // 以下四种是后期才放出来的「有脾气」的敌机，各有各的威胁方式
   sniper: { hp: 4, speed: 130, score: 420, xp: 4, color: COLORS.cyan, radius: 15, dropChance: 0.16 },
@@ -340,16 +346,39 @@ export class Enemy extends Phaser.Physics.Arcade.Sprite {
       case 'elite': {
         // 和射击机一样深入战场后悬停，但停得更靠前、更硬、打得更狠。
         // 弹数随难度涨，「属性不断提升」不只是血 —— 阶跃那一段再叠一道
+        //
+        // 停靠深度按**进场那一条边**算，不用上面那个通用的 inward（从出生点飞了多远）：
+        // 换血之后精英机是从编队里顶替出来的，而编队尾巴上的成员出生点在屏幕外几百像素
+        // （列队 / 蛇形 / 蜂群是 i * 35~60 一路退出去的，能退到 700 开外）——
+        // 按「飞了多远」算，这一批精英机会停在屏幕外：悬停十四秒、一枪不放、白占一个名额，
+        // 而且是玩家最想要压力的那几波里凭空少掉的（实测第 6 关抓到过停在场外 189 像素的一架）
         const leaving = this.t > 14;
         const station = Math.min(GAME_W, GAME_H) * 0.32;
-        const fwd = leaving ? sp * 2 : inward < station ? sp * 1.4 : 14;
+        // 进场方向是轴对齐的（见 GameScene.entry），所以哪条边进场就看哪一个轴。
+        // 不能用「离最近那条边」：贴着左边进场、往下飞的精英机会一路飞到下边缘才停
+        const depth = ca > 0.5 ? this.x : ca < -0.5 ? GAME_W - this.x : sa > 0 ? this.y : GAME_H - this.y;
+        const fwd = leaving ? sp * 2 : depth < station ? sp * 1.4 : 14;
         const lat = Math.sin(this.t * 1.2 + this.phase) * 84;
         this.setVelocity(ca * fwd + px * lat, sa * fwd + py * lat);
         this.rotation += dt * 0.8;
         if (!leaving && onScreen && time >= this.nextFire) {
           this.nextFire = time + ELITE.fireMs / (1 + this.diff * ELITE.firePerStage);
-          const shots = ELITE.shots + Math.min(3, Math.floor(this.diff / 3)) + Math.min(3, this.tier);
-          game.fireEnemyAimed(this.x, this.y, ELITE.speed, 'ebullet4', shots, ELITE.spread, ELITE_SHOT);
+          // 一轮 = **正中一颗红弹 + 两侧一对普通弹**（两侧发数见 config 的 ELITE.shots）。
+          //
+          // 红弹只有一颗，而且是**正对瞄准点**的那一颗 —— 这一颗负责「必须动」：
+          // 红弹无视护盾、穿得过光球，站着不动就只能挨它。两侧那对是偶数发，
+          // 正中留出的空档（偶数发的几何，见 config 的 ELITE.shots）正好被这颗红弹占着
+          //
+          // 两侧的普通弹是**能挡的**：伤害轻（HIT.bullet 对 eliteBullet）、
+          // 护盾和环绕光球都吃得住 —— 有了这两颗，玩家的技能才有用武之地，
+          // 不然一屏幕全是挡不住的红弹，点满的技能在精英机面前等于没点。
+          // 「躲正中那颗、扛两边那两颗」就是这个机型现在要玩家做的判断
+          //
+          // 后期那一档加在**普通弹**上（2 → 4），红弹始终一颗：
+          // 加量加在能挡的那一半，红弹一多就又变成「只能一直退」了
+          const extra = this.diff >= 5 || this.tier > 0 ? 2 : 0;
+          game.fireEnemyAimed(this.x, this.y, ELITE.speed, 'ebullet4', 1, 0, ELITE_SHOT);
+          game.fireEnemyAimed(this.x, this.y, ELITE.speed, 'ebullet', ELITE.shots + extra, ELITE.spread);
         }
         break;
       }

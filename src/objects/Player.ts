@@ -54,8 +54,6 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   skills = emptySkills();
   /** 急速射击道具的到期时间 */
   rapidUntil = 0;
-  /** 无敌星道具的到期时间 */
-  starUntil = 0;
   /** 冲刺结束时间 */
   dashUntil = 0;
   /** 冲刺冷却结束时间 */
@@ -63,7 +61,6 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   /** 触屏 / 鼠标拖动时的目标位置 */
   dragTarget?: Phaser.Math.Vector2;
   private lastShot = 0;
-  private rainbow = false;
   private dashTint = false;
   /** 最近一次的移动方向，冲刺沿它冲出去 */
   private dirX = 0;
@@ -142,11 +139,7 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   }
 
   get invulnerable(): boolean {
-    return this.dashing || this.scene.time.now < this.invulnUntil || this.starred;
-  }
-
-  get starred(): boolean {
-    return this.scene.time.now < this.starUntil;
+    return this.dashing || this.scene.time.now < this.invulnUntil;
   }
 
   get rapid(): boolean {
@@ -318,16 +311,8 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
       this.dashTint = true;
       return;
     }
-    if (this.starred) {
-      // 无敌星：彩虹闪烁
-      const colors = [COLORS.yellow, COLORS.magenta, COLORS.cyan, COLORS.green];
-      this.setTint(colors[Math.floor(time / 70) % colors.length]).setAlpha(1);
-      this.rainbow = true;
-      return;
-    }
     // 只在特效结束时清一次颜色，别把受击白闪也清掉
-    if (this.rainbow || this.dashTint) {
-      this.rainbow = false;
+    if (this.dashTint) {
       this.dashTint = false;
       this.clearTint();
     }

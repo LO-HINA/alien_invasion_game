@@ -302,17 +302,9 @@ export function generateTextures(scene: Phaser.Scene): void {
     glow(g, COLORS.orange, polyPath([[-5, 0], [0, -6], [5, 0]], cx, cy, false), 0.5);
     glow(g, COLORS.orange, polyPath([[-5, 6], [0, 0], [5, 6]], cx, cy, false), 0.5);
   });
-  // 无敌星
-  make(scene, 'pu_star', 40, 40, (g, cx, cy) => {
-    const star: Pt[] = [];
-    for (let i = 0; i < 10; i++) {
-      const a = -Math.PI / 2 + (i * Math.PI) / 5;
-      const r = i % 2 ? 6 : 15;
-      star.push([Math.cos(a) * r, Math.sin(a) * r]);
-    }
-    fillPoly(g, star, cx, cy, COLORS.yellow, 0.3);
-    glow(g, COLORS.yellow, polyPath(star, cx, cy), 0.7);
-  });
+  // 无敌星（pu_star）删掉了：全场 6 秒无敌配上玩家本来就堆得起来的火力，
+  // 拿到就是「接下来 6 秒不用玩」，躲弹幕这件事被它整个抹掉。道具应该是
+  // 让玩家多一点余量，不是替玩家把那一段打完
   // 经验晶体
   make(scene, 'pu_xp', 40, 40, (g, cx, cy) => {
     const gem: Pt[] = [[0, -15], [10, -3], [0, 15], [-10, -3]];

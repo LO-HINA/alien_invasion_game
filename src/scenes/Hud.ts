@@ -133,7 +133,6 @@ export class Hud {
     this.weapon.setText(`WEAPON Lv${p.weapon}${p.weapon >= PLAYER.maxWeapon ? ' MAX' : ''}`);
     const buffs: string[] = [];
     if (p.rapid) buffs.push(`急速 ${Math.ceil((p.rapidUntil - now) / 1000)}s`);
-    if (p.starred) buffs.push(`无敌 ${Math.ceil((p.starUntil - now) / 1000)}s`);
     this.buffs.setText(buffs.join('   '));
     this.bombCount.setText(`×${s.bombs}`);
     this.bombButton.setAlpha(s.bombs > 0 ? 1 : 0.35);

@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { COLORS, GAME_H, GAME_W, HEAL_AMOUNT } from '../config';
 
-export type PowerKind = 'weapon' | 'shield' | 'bomb' | 'heal' | 'rapid' | 'star' | 'xp';
+export type PowerKind = 'weapon' | 'shield' | 'bomb' | 'heal' | 'rapid' | 'xp';
 
 export const POWER_INFO: Record<PowerKind, { weight: number; label: string; color: number }> = {
   weapon: { weight: 3, label: '火力提升', color: COLORS.yellow },
@@ -9,7 +9,6 @@ export const POWER_INFO: Record<PowerKind, { weight: number; label: string; colo
   heal: { weight: 2, label: `修复 +${HEAL_AMOUNT}`, color: COLORS.green },
   bomb: { weight: 1, label: '炸弹 +1', color: COLORS.orange },
   rapid: { weight: 2, label: '急速射击', color: COLORS.orange },
-  star: { weight: 0.8, label: '无敌', color: COLORS.yellow },
   // 经验晶体不再走随机掉落，它由击杀敌机单独产出
   xp: { weight: 0, label: '经验', color: COLORS.blue },
 };

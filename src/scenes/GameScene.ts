@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { BULLET, BULLET_HIT, COLORS, COMBO_WINDOW_MS, eliteCap, elitePerWave, FREEZE, GAME_H, GAME_W, GRAZE, HEAL_AMOUNT, hex, hitDamage, HIT, HURT_VIGNETTE_MS, LASER, LEECH, MAX_MULTIPLIER, PLAYER, REROLLS, stageDiff, stagePack, stageTier, STEP, XP_PICKUP, xpToNext } from '../config';
+import { BULLET, BULLET_HIT, COLORS, COMBO_WINDOW_MS, DROP, dropScale, eliteCap, eliteFieldCap, elitePerWave, FREEZE, GAME_H, GAME_W, GRAZE, HEAL_AMOUNT, hex, hitDamage, HIT, HURT_VIGNETTE_MS, LASER, LEECH, MAX_MULTIPLIER, MIX, MIX_FIELD_MAX, PLAYER, REROLLS, stageDiff, stagePack, stageTier, XP_PICKUP, xpToNext } from '../config';
 import { Arsenal } from '../objects/Arsenal';
 import { Boss } from '../objects/Boss';
 import { Bullet, type BulletOpts } from '../objects/Bullet';
@@ -60,15 +60,27 @@ const EMPTY_PULL_MS = 900;
  *     一关的开头也不该直接撞上它们
  * waveCount 每关开场归零，所以第二个条件是**每一关**都生效的 —— 只写 wave 的话
  * 每一关的第六波都会来一架，第一关也不例外（之前就是这么漏的）
+ *
+ * 关数那一半放在 config 的 MIX.fromStage：换血的起始关、精英机数量的爬升
+ * 都从同一个数起算，写两份迟早会调歪一份
  */
-const SPECIAL_FROM_STAGE = 5;
+const SPECIAL_FROM_STAGE = MIX.fromStage;
 const SPECIAL_FROM_WAVE = 5;
+/**
+ * 换血阶段**不顶替**的机型：精英机自己是顶替进来的那一个；激光机走的是
+ * special 那条线、本来就不算杂兵；冲击机是刻意留下的普通机型 ——
+ * 「留三分之一杂兵」里就有它（血量另给了一大截，见 Enemy 的 charger）。
+ *
+ * 注意这一条只管「顶不顶替」，**不管总数闸** —— 不顶替的机型一样占场上的位置
+ * （见下面 spawn 里那段：两件事共用一个条件的话，后期会变成一屏幕冲击机）
+ */
+const MIX_KEEP = new Set<EnemyKind>(['elite', 'laser', 'charger']);
 /**
  * 激光机的出场概率与同时上限 —— 全场最少的机型，多了一屏幕都是线，反而没地方站
  */
 const LASER_CHANCE = 0.16;
-/** 激光机同时最多几台：第 10 关起放宽到两台，一道光束封不住的时候加第二道 */
-const LASER_MAX = (stage: number) => (stage >= 10 ? 2 : 1);
+/** 激光机同时最多几台：第 10 关起放宽到三台，一道光束封不住的时候加第二、第三道 */
+const LASER_MAX = (stage: number) => (stage >= 10 ? 3 : 2);
 
 // 四边出现概率，正面仍然是主要压力来源
 const SIDE_WEIGHT: [EntrySide, number][] = [
@@ -137,6 +149,11 @@ export class GameScene extends Phaser.Scene {
   private waveCount = 0;
   private nextWaveAt = 0;
   private bossAt = 0;
+  /** 这一波的换血比例（0~1），spawnWave 每波重算，见 MIX */
+  private takeover = 0;
+  /** 道具掉落的令牌桶：手头还有几个令牌、下一次补是什么时候（见 config 的 DROP） */
+  private dropTokens = DROP.capacity;
+  private dropRefillAt = 0;
   private level = 1;
   private xp = 0;
   private pendingLevels = 0;
@@ -266,10 +283,6 @@ export class GameScene extends Phaser.Scene {
           enemy.dashHitAt = this.time.now + 220;
           this.hitEnemy(enemy, p.dashDamage);
         }
-        return;
-      }
-      if (p.starred) {
-        this.hitEnemy(enemy, 50);
         return;
       }
       if (p.invulnerable) return;
@@ -488,10 +501,35 @@ export class GameScene extends Phaser.Scene {
 
   /** 从指定边生成一架敌机 */
   private spawn(side: EntrySide, kind: EnemyKind, u: number, back: number, opts: SpawnOpts = {}): void {
+    // 换血阶段：普通杂兵**按比例直接顶替成精英机**，而且场上的总数另有上限
+    // （两道闸都在 config 的 MIX / MIX_FIELD_MAX 里，这里只按顺序执行）。
+    //
+    // 是「顶替」不是「少放几架外加几架」：一波里飞进来多少架基本不变，
+    // 变的只是构成 —— 换掉的杂兵不用另外找东西来填。这一手比「缩编」也好：
+    // 编队形态原样保留（V 字还是 V 字、横排还是横排），只是里面坐的东西换了，
+    // 玩家一眼看到的是「怎么全变红了」，而不是「队形怎么变了」
+    let spawnKind = kind;
+    if (this.takeover > 0) {
+      // 顶替和总数闸是两件事，别混成一个条件：
+      //   · 顶替只对「会被精英机换掉」的杂兵生效 —— 冲击机、激光机不在其列（见 MIX_KEEP）
+      //   · 总数闸是**所有机型都占位置**，包括那两种不顶替的
+      // 早先两件事共用一个 if，结果冲击机既不顶替、又不受总数管，后期变成一屏幕
+      // 十七架冲击机（第 15 关实测），而它们本该是「保留的少数派」——
+      // 那会儿场上被冲击机占满，精英机反而挤不进来，跟这套设计正好反着
+      const swap = !MIX_KEEP.has(kind) && Math.random() < this.takeover * (1 - MIX.mookFloor);
+      if (swap && this.countKind('elite') < eliteFieldCap(this.stage)) {
+        spawnKind = 'elite';
+      } else if (this.liveCount() >= MIX_FIELD_MAX) {
+        // 总数闸。满了就**省掉这一架**，但顶替成精英机的那一架不受这条闸限制 ——
+        // 顺序反过来（先闸总数再定机型）的话，场上一挤精英机就进不来了，
+        // 比例会一路滑回「一屏幕杂兵」，正是这一整套要治的那个毛病
+        return;
+      }
+    }
     const p = this.entry(side, u, back);
     // 阶跃档数在这里统一发下去。只有精英机吃它，别的机型读了也不用 ——
     // 但发在这一处，就不必每次加新机型都记得带上
-    this.spawnEnemy(kind, p.x, p.y, { ...opts, angle: p.angle, tier: stageTier(this.stage) });
+    this.spawnEnemy(spawnKind, p.x, p.y, { ...opts, angle: p.angle, tier: stageTier(this.stage) });
   }
 
   private pickSide(): EntrySide {
@@ -511,6 +549,8 @@ export class GameScene extends Phaser.Scene {
    * 每组各自挑一条边（pickSide），所以同一个波次里天然就是混着、从不同方向来的。
    */
   private spawnWave(): void {
+    // 这一波的换血比例先定下来，后面 spawn / spawnSpecials 都读它
+    this.takeover = this.takeoverAt();
     this.wavePattern(this.pick(GUN_PATTERNS));
     this.wavePattern(this.pick(BULK_PATTERNS));
     // 第三组跟着关数涨：三面同时压过来是后期才该出现的场面
@@ -521,18 +561,42 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
+   * 这一波有多少比例该换成精英机（0~1）：**每关第 8 波起**开始换，
+   * 换 `MIX.overWaves` 波到位，之后这一关剩下的波数就都是换完的场面（见 config 的 MIX）。
+   *
+   * 只有两档：换血前的 0 和换血后的 1（连同中间那几波的斜坡）。
+   * 早先还按关数压了一道「深度」——第 5 关先换一小半、第 9 关才换满。删掉它是因为
+   * 它压出来的效果正好和想做的相反：换掉的杂兵少了，场上就既没有杂兵的分量、
+   * 也没有精英机的分量，第 5 关和第 9 关玩起来几乎一样，后期该来的压力迟迟不来。
+   * 第 5 关之后就该是后期 —— 这是个小游戏，一波十几秒，节奏拖不起
+   *
+   * waveCount 是 0 基的（spawnWave 跑完才 ++），所以 +1 才是玩家看到的「第几波」
+   */
+  private takeoverAt(): number {
+    if (this.stage < SPECIAL_FROM_STAGE) return 0;
+    const wave = this.waveCount + 1;
+    if (wave < MIX.fromWave) return 0;
+    return Math.min(1, (wave - MIX.fromWave + 1) / MIX.overWaves);
+  }
+
+  /**
    * 精英机和激光机。两个都**不算编队**：各自挑一条边、单独进场。
    * 混在队形里飞进来的话，玩家会把它当成「又一架小飞机」，它就不精英了。
    */
   private spawnSpecials(): void {
     // 第 5 关之前、以及每一关的前 5 波，这两种都不该出现（见 SPECIAL_FROM_STAGE）
     if (this.stage < SPECIAL_FROM_STAGE || this.waveCount < SPECIAL_FROM_WAVE) return;
-    // 精英机：从这一波起每一波都掺，但场上同时几架有上限 —— 它血厚，
-    // 堆起来只会把战斗拖成磨血，而不是变难。
-    // 第 10 关之后这个上限一关抬一级（见 config 的 STEP），一波里能掺进来的架数
-    // 也跟着涨：它是「难度一关比一关高一档」唯一那个还能一直往上走的着力点
-    const room = eliteCap(this.stage) - this.countKind('elite');
-    for (let i = 0; i < Math.min(room, elitePerWave(this.stage)); i++) this.spawnOne('elite');
+    // 精英机：换血之前（第 6、7 波）按老规矩一波掺一两架；第 10 关之后这个上限
+    // 一关抬一级（见 config 的 STEP），它是「难度一关比一关高一档」的那个着力点。
+    //
+    // 换血一开始（第 8 波起）这里就**不再补了** —— 那时候精英机是从队形里
+    // 顶替杂兵上来的（见 spawn 的 takeover），按架数一波能顶上来十几架，
+    // 再在这儿额外叠一层，精英机就比原来的杂兵总数还多了：场上是变挤了，
+    // 但「总数不变、只换构成」这件事也就没了
+    if (this.takeover <= 0) {
+      const room = eliteCap(this.stage) - this.countKind('elite');
+      for (let i = 0; i < Math.min(room, elitePerWave(this.stage)); i++) this.spawnOne('elite');
+    }
     // 激光机：概率很低。它不开弹，作用是封走位 —— 一屏幕都是线的话，
     // 玩家反而无处可站，那就从「逼你挪窝」变成「不让你玩」了
     if (Math.random() < LASER_CHANCE && this.countKind('laser') < LASER_MAX(this.stage)) this.spawnOne('laser');
@@ -551,6 +615,22 @@ export class GameScene extends Phaser.Scene {
     let c = 0;
     this.eachEnemy((e) => {
       if (e.kind === kind) c++;
+    });
+    return c;
+  }
+
+  /**
+   * 场上现在一共几架 —— **当场数**，不用每帧刷新的 enemiesAlive。
+   *
+   * 差别在「一波」上：一波是在**同一帧里连发几十架**的（蜂群 22 架、横排 14 架、
+   * 第三组再叠一层），那一帧里 enemiesAlive 还是波次开始前的旧值，读它等于没闸 ——
+   * 实测第 15 关偶发场上 67 架（那时候闸值是 39）。每一架都当场数一遍就不会漏，
+   * 一遍是几十次循环，一波几十架，代价可以忽略
+   */
+  private liveCount(): number {
+    let c = 0;
+    this.eachEnemy(() => {
+      c++;
     });
     return c;
   }
@@ -773,10 +853,11 @@ export class GameScene extends Phaser.Scene {
       this.phase = 'waves';
       this.nextWaveAt = this.time.now + 1500;
       // 把关数背后的强度也报出来：难度是后段加速的，玩家该看得见自己被推着走。
-      // 第 10 关之后「强度」那个数就不太说明问题了（乘数还在涨，但底下的东西都封顶了），
-      // 真正在变的是精英机的配额，所以改成报它 —— 台阶要看得见才叫台阶
-      const sub = this.stage > STEP.fromStage
-        ? `敌方强度 ×${this.diff.toFixed(1)} · 精英机 ×${eliteCap(this.stage)}`
+      // 第 5 关之后「强度」那个数就不太说明问题了（乘数还在涨，但底下的东西都封顶了），
+      // 真正在变的是**这一关后半段场上站着的是什么**，所以改成报它 ——
+      // 台阶要看得见才叫台阶
+      const sub = this.stage >= SPECIAL_FROM_STAGE
+        ? `敌方强度 ×${this.diff.toFixed(1)} · 第 ${MIX.fromWave} 波起换成精英机为主`
         : `敌方强度 ×${this.diff.toFixed(1)}`;
       this.banner(`STAGE ${this.stage}`, COLORS.cyan, 1800, sub);
     });
@@ -960,9 +1041,32 @@ export class GameScene extends Phaser.Scene {
     this.addScore(def.score, e.x, e.y);
     // 经验掉在原地，得自己飞过去捡
     this.dropXp(e.x, e.y, def.xp);
-    if (Math.random() < def.dropChance) this.dropPowerUp(e.x, e.y);
+    // 道具要过两道闸：先按关数压过的概率掷一次，再看令牌桶里还有没有额度
+    // （见 config 的 DROP）。顺序不能反 —— 先扣令牌再掷骰子的话，
+    // 概率一低就永远攒不满桶
+    if (Math.random() < def.dropChance * dropScale(this.stage) && this.takeDropToken(this.time.now)) {
+      this.dropPowerUp(e.x, e.y);
+    }
     this.leech(def.xp);
     e.disableBody(true, true);
+  }
+
+  /**
+   * 掉落的硬闸：令牌桶。有令牌才放行，并且扣掉一个。
+   * 掷骰子没过的时候不该走这里 —— 否则掉率越低，桶越是攒不起来
+   */
+  private takeDropToken(time: number): boolean {
+    if (this.dropRefillAt === 0) this.dropRefillAt = time + DROP.refillMs;
+    if (time >= this.dropRefillAt) {
+      // 一次补齐这段时间攒下的（封顶 capacity），而不是只补一个：
+      // 场上安静了一阵之后，紧接着的那几下击杀该照常掉东西，不必重新等满一轮
+      const gained = 1 + Math.floor((time - this.dropRefillAt) / DROP.refillMs);
+      this.dropTokens = Math.min(DROP.capacity, this.dropTokens + gained);
+      this.dropRefillAt += gained * DROP.refillMs;
+    }
+    if (this.dropTokens <= 0) return false;
+    this.dropTokens--;
+    return true;
   }
 
   /**
@@ -1106,7 +1210,6 @@ export class GameScene extends Phaser.Scene {
     const p = this.player;
     p.invulnUntil = Math.max(p.invulnUntil + d, this.game.loop.time + PLAYER.levelUpInvulnMs);
     p.rapidUntil += d;
-    p.starUntil += d;
     p.dashUntil += d;
     this.comboUntil += d;
     this.nextWaveAt += d;
@@ -1318,9 +1421,6 @@ export class GameScene extends Phaser.Scene {
         break;
       case 'rapid':
         p.rapidUntil = Math.max(now, p.rapidUntil) + 8000;
-        break;
-      case 'star':
-        p.starUntil = Math.max(now, p.starUntil) + 6000;
         break;
       default:
         break;
